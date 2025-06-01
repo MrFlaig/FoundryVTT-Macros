@@ -28,6 +28,19 @@ Interactive game time macro, that lets you advance time. 1 year = 512 days; 1 ye
 - Foundry VTT v13+
 - System-agnostic
 
+### MCDM_MinionManagment
+A collection of four macros, that lets you manage multiple minions groups and see which ones have already moved or attacked.
+
+Mark a selected group of tokens with a custom status effect with a key "group01", "group02" or "group03". You can use [Custom D&D](https://github.com/Larkinabout/fvtt-custom-dnd5e/) for example to create custom effects.
+
+`mark_minion_group.js`: Lets you mark the active group. They get two status effects: Attack & Move: You can remove them individually with the following macros when a token is selected.
+`delete_move.js`: Removes the "Move" status effect
+`delete_attack.js`: Removes the "Attack" statuts effect.
+`remove_minion_group_marker.js`: Removes the animation from the whole group.
+- Foundry VTT v13+
+- D&D5e 5.x
+- J2BA
+
 ## License
 
 MIT License
