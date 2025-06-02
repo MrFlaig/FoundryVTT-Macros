@@ -47,7 +47,7 @@ Mark a selected group of tokens with a custom status effect with a key "group01"
 ### Theatre_Actors
 A temporary solution to make up for Theatre Inserts until it hopefully gets updated to V13
 
-**File:** `theatre.js`: Lets you mark the active group. They get two status effects: Attack & Move: You can remove them individually with the following macros when a token is selected.
+**File:** `theatre.js`: Lets you create a dialog to display actor images on top of the ui.
 
 <img src="https://raw.githubusercontent.com/MrFlaig/FoundryVTT-Macros/refs/heads/master/images/theatre.png" alt="Screenshot of the macro" width="500"/>
 
