@@ -33,16 +33,27 @@ A collection of four macros, that lets you manage multiple minions groups and se
 
 Mark a selected group of tokens with a custom status effect with a key "group01", "group02" or "group03". You can use [Custom D&D](https://github.com/Larkinabout/fvtt-custom-dnd5e/) for example to create custom effects.
 
-`mark_minion_group.js`: Lets you mark the active group. They get two status effects: Attack & Move: You can remove them individually with the following macros when a token is selected.
+**File:** `mark_minion_group.js`: Lets you mark the active group. They get two status effects: Attack & Move: You can remove them individually with the following macros when a token is selected.
 
-`delete_move.js`: Removes the "Move" status effect
+**File:** `delete_move.js`: Removes the "Move" status effect
 
-`delete_attack.js`: Removes the "Attack" statuts effect.
+**File:** `delete_attack.js`: Removes the "Attack" statuts effect.
 
-`remove_minion_group_marker.js`: Removes the animation from the whole group.
+**File:** `remove_minion_group_marker.js`: Removes the animation from the whole group.
 - Foundry VTT v13+
 - D&D5e 5.x
 - J2BA
+
+### Theatre_Actors
+A temporary solution to make up for Theatre Inserts until it hopefully gets updated to V13
+
+**File:** `theatre.js`: Lets you mark the active group. They get two status effects: Attack & Move: You can remove them individually with the following macros when a token is selected.
+
+<img src="https://github.com/MrFlaig/FoundryVTT-Macros/images/theatre.png" alt="Screenshot of the macro" width="500"/>
+
+- Foundry VTT v13+
+- System-agnostic
+- Sequencer
 
 ## License
 
