@@ -49,7 +49,7 @@ A temporary solution to make up for Theatre Inserts until it hopefully gets upda
 
 **File:** `theatre.js`: Lets you mark the active group. They get two status effects: Attack & Move: You can remove them individually with the following macros when a token is selected.
 
-<img src="https://github.com/MrFlaig/FoundryVTT-Macros/images/theatre.png" alt="Screenshot of the macro" width="500"/>
+<img src="https://raw.githubusercontent.com/MrFlaig/FoundryVTT-Macros/refs/heads/master/images/theatre.png" alt="Screenshot of the macro" width="500"/>
 
 - Foundry VTT v13+
 - System-agnostic
