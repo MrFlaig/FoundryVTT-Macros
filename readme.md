@@ -9,7 +9,7 @@ Useful macros for Foundry Virtual Tabletop v13+.
 3. Paste code and save
 
 ## Macros
----
+
 ### Region Behavior Toggle
 **File:** `region-behavior-toggle.js`
 Toggle region behaviors on/off from a clean dialog interface.
