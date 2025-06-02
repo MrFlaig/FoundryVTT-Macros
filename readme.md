@@ -28,7 +28,7 @@ Interactive game time macro, that lets you advance time. 1 year = 512 days; 1 ye
 - Foundry VTT v13+
 - System-agnostic
 ---
-### MCDM 
+### MCDM Minion Management
 MinionManagment
 A collection of four macros, that lets you manage multiple minions groups and see which ones have already moved or attacked.
 
