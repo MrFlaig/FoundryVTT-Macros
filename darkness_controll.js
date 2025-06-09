@@ -1,17 +1,18 @@
-// Darkness Slider Macro mit korrigierter ApplicationV2 für Live-Updates
-class DarknessSliderApp extends foundry.applications.api.ApplicationV2 {
+// Advanced Darkness Controller - Simple Timekeeping Style
+class AdvancedDarknessApp extends foundry.applications.api.ApplicationV2 {
     static DEFAULT_OPTIONS = {
-        id: "darkness-slider",
+        id: "advanced-darkness",
         window: {
-            title: "Adjust Scene Darkness",
-            icon: "fas fa-adjust"
+            title: "Scene Darkness with Presets",
+            icon: "fas fa-adjust",
+            resizable: true
         },
         position: {
-            width: 400,
-            height: 280
+            width: 450,
+            height: 450
         },
-        classes: ["darkness-slider"],
-        modal: true
+        classes: ["advanced-darkness"],
+        modal: false  // Changed to false so it's less intrusive and resizable
     };
 
     constructor() {
@@ -27,10 +28,9 @@ class DarknessSliderApp extends foundry.applications.api.ApplicationV2 {
         };
     }
 
-    // ERFORDERLICH: renderHTML Methode
     async _renderHTML(context, options) {
         return `
-        <form class="flexcol">
+        <form class="flexcol" style="height: 100%; padding: 15px;">
         <div style="text-align: center; margin-bottom: 20px;">
         <div style="font-size: 1.4em; font-weight: bold; margin-bottom: 15px; color: var(--color-text-primary);">
         Darkness Level: <span id="darkness-value">${context.sliderValue}</span>%
@@ -52,11 +52,33 @@ class DarknessSliderApp extends foundry.applications.api.ApplicationV2 {
         <span><i class="fas fa-sun" style="margin-right: 4px;"></i>Bright</span>
         </div>
         </div>
-        <div class="form-group" style="margin-top: 20px;">
-        <button type="button" id="save-btn" class="dialog-button" style="width: 100%; margin-bottom: 8px;">
-        <i class="fas fa-save"></i> Save & Animate
+
+        <!-- Time of Day Presets -->
+        <div style="margin: 15px 20px;">
+        <label style="font-weight: bold; display: block; margin-bottom: 8px;">Quick Time Presets:</label>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+        <button type="button" class="time-preset" data-darkness="0" style="padding: 8px; font-size: 0.85em;">
+        <i class="fas fa-sun"></i> Midday (0%)
         </button>
-        <button type="button" id="cancel-btn" class="dialog-button" style="width: 100%;">
+        <button type="button" class="time-preset" data-darkness="20" style="padding: 8px; font-size: 0.85em;">
+        <i class="fas fa-cloud-sun"></i> Dawn (20%)
+        </button>
+        <button type="button" class="time-preset" data-darkness="80" style="padding: 8px; font-size: 0.85em;">
+        <i class="fas fa-cloud-moon"></i> Dusk (80%)
+        </button>
+        <button type="button" class="time-preset" data-darkness="100" style="padding: 8px; font-size: 0.85em;">
+        <i class="fas fa-moon"></i> Midnight (100%)
+        </button>
+        </div>
+        </div>
+
+        <!-- Action Buttons - Fixed at bottom with flex-grow spacer -->
+        <div style="flex-grow: 1;"></div>
+        <div class="form-group" style="margin-top: 20px;">
+        <button type="button" id="save-btn" class="dialog-button" style="width: 100%; margin-bottom: 8px; padding: 10px;">
+        <i class="fas fa-save"></i> Apply Darkness
+        </button>
+        <button type="button" id="cancel-btn" class="dialog-button" style="width: 100%; padding: 10px;">
         <i class="fas fa-times"></i> Cancel
         </button>
         </div>
@@ -64,7 +86,6 @@ class DarknessSliderApp extends foundry.applications.api.ApplicationV2 {
         `;
     }
 
-    // ERFORDERLICH: replaceHTML Methode
     async _replaceHTML(result, content, options) {
         content.innerHTML = result;
     }
@@ -72,35 +93,45 @@ class DarknessSliderApp extends foundry.applications.api.ApplicationV2 {
     _onRender(context, options) {
         super._onRender(context, options);
 
-        // Get elements
         const slider = this.element.querySelector('#darknessRange');
         const valueDisplay = this.element.querySelector('#darkness-value');
         const saveBtn = this.element.querySelector('#save-btn');
         const cancelBtn = this.element.querySelector('#cancel-btn');
+        const timePresets = this.element.querySelectorAll('.time-preset');
 
         // Live slider updates
         slider.addEventListener('input', (event) => {
-            // Invertiere den Slider-Wert: 0 = hell (0% darkness), 100 = dunkel (100% darkness)
             const brightnessValue = parseInt(event.target.value);
-            this.sliderValue = 100 - brightnessValue; // Konvertiere zu darkness
+            this.sliderValue = 100 - brightnessValue;
             valueDisplay.textContent = this.sliderValue;
-
-            // Optional: Live preview (uncomment for real-time updates)
-            // const previewDarkness = this.sliderValue / 100;
-            // canvas.scene.update({"environment.darknessLevel": previewDarkness});
         });
 
-        // Save button
+        // Time preset buttons
+        timePresets.forEach(btn => {
+            btn.addEventListener('click', (event) => {
+                const darkness = parseInt(event.currentTarget.dataset.darkness);
+
+                this.sliderValue = darkness;
+                slider.value = 100 - darkness;
+                valueDisplay.textContent = darkness;
+
+                // Apply immediately for preview
+                this.applyEnvironment(darkness / 100, true);
+            });
+        });
+
+        // Save button - Apply full environment like Simple Timekeeping
         saveBtn.addEventListener('click', async () => {
             const targetDarkness = this.sliderValue / 100;
-            await this.animateDarkness(this.currentDarkness, targetDarkness, 3000);
+            await this.applyEnvironment(targetDarkness, this.getCurrentColor(targetDarkness), false);
             this.close();
         });
 
         // Cancel button
         cancelBtn.addEventListener('click', async () => {
-            // Reset to original darkness if changed
-            await canvas.scene.update({"environment.darknessLevel": this.currentDarkness});
+            await canvas.scene.update({
+                "environment.darknessLevel": this.currentDarkness
+            }, { animateDarkness: true });
             this.close();
         });
 
@@ -113,40 +144,31 @@ class DarknessSliderApp extends foundry.applications.api.ApplicationV2 {
             }
         });
 
-        // Focus slider for immediate use
         slider.focus();
     }
 
-    // Smooth darkness animation
-    async animateDarkness(from, to, durationMs) {
-        const steps = 60; // More steps for smoother animation
-        const delay = durationMs / steps;
-
-        ui.notifications.info(`Animating darkness from ${Math.round(from * 100)}% to ${Math.round(to * 100)}%...`);
-
-        for (let i = 1; i <= steps; i++) {
-            // Ease-in-out animation curve
-            const progress = this.easeInOutCubic(i / steps);
-            const value = from + (to - from) * progress;
-
-            await canvas.scene.update({"environment.darknessLevel": value});
-            await new Promise(r => setTimeout(r, delay));
+    // Apply environment changes - focused on darkness only
+    async applyEnvironment(darknessLevel, isPreview = false) {
+        if (!isPreview) {
+            ui.notifications.info(`Applying darkness: ${Math.round(darknessLevel * 100)}%...`);
         }
 
-        ui.notifications.info("Darkness animation complete!");
-    }
+        // Use Foundry's native animation - much simpler than custom loops!
+        await canvas.scene.update({
+            "environment.darknessLevel": darknessLevel
+        }, { animateDarkness: true });
 
-    // Smooth easing function
-    easeInOutCubic(t) {
-        return t < 0.5 ? 4 * t * t * t : (t - 1) * (2 * t - 2) * (2 * t - 2) + 1;
+        if (!isPreview) {
+            ui.notifications.info("Darkness update complete!");
+        }
     }
 }
 
-// Prüfen ob bereits eine Instanz läuft
-if (game.darknessSliderApp?.rendered) {
-    game.darknessSliderApp.close();
+// Check if already running
+if (game.darknessPresetsApp?.rendered) {
+    game.darknessPresetsApp.close();
 }
 
-// Neue Instanz erstellen und anzeigen
-game.darknessSliderApp = new DarknessSliderApp();
-game.darknessSliderApp.render(true);
+// Create and show new instance
+game.darknessPresetsApp = new AdvancedDarknessApp();
+game.darknessPresetsApp.render(true);
