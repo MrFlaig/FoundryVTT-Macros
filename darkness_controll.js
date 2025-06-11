@@ -1,4 +1,4 @@
-// Advanced Darkness Controller - Simple Timekeeping Style
+// Advanced Darkness Controller - Fixed Version (Slider Works!)
 class AdvancedDarknessApp extends foundry.applications.api.ApplicationV2 {
     static DEFAULT_OPTIONS = {
         id: "advanced-darkness",
@@ -12,7 +12,7 @@ class AdvancedDarknessApp extends foundry.applications.api.ApplicationV2 {
             height: 450
         },
         classes: ["advanced-darkness"],
-        modal: false  // Changed to false so it's less intrusive and resizable
+        modal: false
     };
 
     constructor() {
@@ -42,14 +42,14 @@ class AdvancedDarknessApp extends foundry.applications.api.ApplicationV2 {
         name="darknessRange"
         min="0"
         max="100"
-        value="${100 - context.sliderValue}"
+        value="${context.sliderValue}"
         step="1"
         style="width: 100%; height: 30px;"
         />
         </div>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px; padding: 0 20px; font-size: 0.9em; color: var(--color-text-dark-secondary);">
-        <span><i class="fas fa-moon" style="margin-right: 4px;"></i>Dark</span>
         <span><i class="fas fa-sun" style="margin-right: 4px;"></i>Bright</span>
+        <span><i class="fas fa-moon" style="margin-right: 4px;"></i>Dark</span>
         </div>
         </div>
 
@@ -72,7 +72,7 @@ class AdvancedDarknessApp extends foundry.applications.api.ApplicationV2 {
         </div>
         </div>
 
-        <!-- Action Buttons - Fixed at bottom with flex-grow spacer -->
+        <!-- Action Buttons -->
         <div style="flex-grow: 1;"></div>
         <div class="form-group" style="margin-top: 20px;">
         <button type="button" id="save-btn" class="dialog-button" style="width: 100%; margin-bottom: 8px; padding: 10px;">
@@ -101,20 +101,20 @@ class AdvancedDarknessApp extends foundry.applications.api.ApplicationV2 {
 
         // Live slider updates
         slider.addEventListener('input', (event) => {
-            const brightnessValue = parseInt(event.target.value);
-            this.sliderValue = 100 - brightnessValue;
-            valueDisplay.textContent = this.sliderValue;
+            const value = parseInt(event.target.value);
+            this.sliderValue = value;
+            valueDisplay.textContent = value;
+            // Optionally, live preview:
+            // this.applyEnvironment(value / 100, true);
         });
 
         // Time preset buttons
         timePresets.forEach(btn => {
             btn.addEventListener('click', (event) => {
                 const darkness = parseInt(event.currentTarget.dataset.darkness);
-
                 this.sliderValue = darkness;
-                slider.value = 100 - darkness;
+                slider.value = darkness;
                 valueDisplay.textContent = darkness;
-
                 // Apply immediately for preview
                 this.applyEnvironment(darkness / 100, true);
             });
@@ -123,7 +123,7 @@ class AdvancedDarknessApp extends foundry.applications.api.ApplicationV2 {
         // Save button - Apply full environment like Simple Timekeeping
         saveBtn.addEventListener('click', async () => {
             const targetDarkness = this.sliderValue / 100;
-            await this.applyEnvironment(targetDarkness, this.getCurrentColor(targetDarkness), false);
+            await this.applyEnvironment(targetDarkness, false);
             this.close();
         });
 
@@ -153,7 +153,6 @@ class AdvancedDarknessApp extends foundry.applications.api.ApplicationV2 {
             ui.notifications.info(`Applying darkness: ${Math.round(darknessLevel * 100)}%...`);
         }
 
-        // Use Foundry's native animation - much simpler than custom loops!
         await canvas.scene.update({
             "environment.darknessLevel": darknessLevel
         }, { animateDarkness: true });
