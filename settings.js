@@ -1,199 +1,460 @@
 /**
- * FOUNDRY VTT SETTINGS MANAGER - ApplicationV2 Version
- * Modern single window solution for exporting and importing all client settings
- * Uses ApplicationV2 with Foundry's built-in CSS variables for consistent theming
+ * FOUNDRY VTT SETTINGS PROFILES MANAGER - ApplicationV2 Version (FIXED)
+ * Profile-based settings management with improved serialization and safety checks
+ * Based on research: Client settings are localStorage-based, World settings require GM permissions
  */
 
-// Missing function fix - validates if a setting is registered
-function isSettingValid(settingKey) {
+// Enhanced validation for complex objects and circular references
+function isSafeForFlagStorage(value, depth = 0, path = '', visited = new WeakSet()) {
+    // Prevent infinite recursion
+    if (depth > 8) { // Reduced from 10 to be more conservative
+        console.warn(`Settings Profile Manager: Depth limit reached at path: ${path}`);
+        return false;
+    }
+    
+    // Null and undefined are safe
+    if (value === null || value === undefined) return true;
+    
+    // Primitive types are safe
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        return true;
+    }
+    
+    // Check for circular references
+    if (typeof value === 'object' && visited.has(value)) {
+        console.warn(`Settings Profile Manager: Circular reference detected at path: ${path}`);
+        return false;
+    }
+    
+    // Arrays are safe if all elements are safe
+    if (Array.isArray(value)) {
+        visited.add(value);
+        const result = value.every((item, index) => 
+            isSafeForFlagStorage(item, depth + 1, `${path}[${index}]`, visited)
+        );
+        visited.delete(value);
+        return result;
+    }
+    
+    // Objects are safe if they're plain objects with safe values
+    if (typeof value === 'object') {
+        // Check if it's a plain object (not a class instance, function, etc.)
+        if (value.constructor !== Object) {
+            console.warn(`Settings Profile Manager: Non-plain object at path: ${path}, constructor: ${value.constructor?.name}`);
+            return false;
+        }
+        
+        // Check for objects that might be problematic for Foundry's expandObject
+        const keys = Object.keys(value);
+        if (keys.length > 100) { // Arbitrary limit for very large objects
+            console.warn(`Settings Profile Manager: Object too large at path: ${path}, keys: ${keys.length}`);
+            return false;
+        }
+        
+        visited.add(value);
+        
+        // Check if all keys are strings and values are safe
+        for (const [key, val] of Object.entries(value)) {
+            if (typeof key !== 'string') {
+                console.warn(`Settings Profile Manager: Non-string key at path: ${path}, key type: ${typeof key}`);
+                visited.delete(value);
+                return false;
+            }
+            
+            // Check for keys that might cause issues with Foundry's expandObject
+            if (key.includes('.') || key.includes('-=') || key.startsWith('_')) {
+                console.warn(`Settings Profile Manager: Problematic key at path: ${path}, key: ${key}`);
+                visited.delete(value);
+                return false;
+            }
+            
+            if (!isSafeForFlagStorage(val, depth + 1, `${path}.${key}`, visited)) {
+                visited.delete(value);
+                return false;
+            }
+        }
+        
+        visited.delete(value);
+        return true;
+    }
+    
+    // Functions, symbols, and other complex types are not safe
+    console.warn(`Settings Profile Manager: Unsafe type at path: ${path}, type: ${typeof value}`);
+    return false;
+}
+
+// Enhanced setting validation with better error reporting
+function isSettingAccessible(settingKey) {
     try {
-        const parts = settingKey.split('.');
-        if (parts.length < 2) return false;
+        if (!game.settings.settings.has(settingKey)) {
+            return false;
+        }
         
-        const namespace = parts[0];
-        const key = parts.slice(1).join('.');
+        const config = game.settings.settings.get(settingKey);
         
-        // Check if the setting is registered in the game.settings.settings Map
-        const registeredKey = `${namespace}.${key}`;
-        return game.settings.settings.has(registeredKey);
+        // If it's a world setting and user is not GM, it's not accessible
+        if (config.scope === "world" && !game.user.isGM) {
+            return false;
+        }
+        
+        // Check if the module/namespace is active
+        const namespace = settingKey.split('.')[0];
+        if (namespace !== 'core') {
+            const module = game.modules.get(namespace);
+            if (!module || !module.active) {
+                return false;
+            }
+        }
+        
+        return true;
     } catch (error) {
+        console.warn(`Settings Profile Manager: Error checking accessibility for ${settingKey}:`, error);
         return false;
     }
 }
 
-class SettingsManagerApp extends foundry.applications.api.ApplicationV2 {
+// Known problematic settings that should be excluded
+const EXCLUDED_SETTINGS = new Set([
+    'core.prototypeTokenOverrides',
+    'core.defaultDrawingConfig',
+    'core.canvasTextStyle', // Often contains complex objects
+    'tokenmagic.presets', // Deep nesting issues
+    // Add more problematic settings as discovered
+]);
+
+// Settings that are known to be safe but complex (whitelist approach)
+const SAFE_COMPLEX_SETTINGS = new Set([
+    // Add settings here that are known to work despite being complex
+]);
+
+// Enhanced setting filtering with better error handling
+function getAccessibleSettings() {
+    const settings = {
+        client: {},
+        world: {},
+        settingsInfo: {}
+    };
+    
+    const totalRegistered = game.settings.settings.size;
+    let processedCount = 0;
+    let skippedCount = 0;
+    let excludedCount = 0;
+    
+    console.log(`Settings Profile Manager: Processing ${totalRegistered} registered settings...`);
+    
+    // Iterate through all registered settings
+    for (const [key, config] of game.settings.settings.entries()) {
+        // Skip explicitly excluded settings
+        if (EXCLUDED_SETTINGS.has(key)) {
+            console.log(`Settings Profile Manager: Excluding known problematic setting: ${key}`);
+            excludedCount++;
+            continue;
+        }
+        
+        if (!isSettingAccessible(key)) {
+            skippedCount++;
+            continue;
+        }
+        
+        try {
+            // Double-check the setting is still registered before accessing
+            if (!game.settings.settings.has(key)) {
+                console.warn(`Setting ${key} no longer registered, skipping`);
+                skippedCount++;
+                continue;
+            }
+            
+            const parts = key.split('.');
+            if (parts.length < 2) {
+                console.warn(`Invalid setting key format: ${key}`);
+                skippedCount++;
+                continue;
+            }
+            
+            const namespace = parts[0];
+            const settingKey = parts.slice(1).join('.');
+            
+            // Try to get the setting value safely
+            let currentValue;
+            try {
+                currentValue = game.settings.get(namespace, settingKey);
+            } catch (getError) {
+                console.warn(`Failed to get setting ${key}: ${getError.message}`);
+                skippedCount++;
+                continue;
+            }
+            
+            // Enhanced safety check with circular reference detection
+            if (!SAFE_COMPLEX_SETTINGS.has(key) && !isSafeForFlagStorage(currentValue)) {
+                console.warn(`Setting ${key} contains unsafe data structure, skipping`);
+                skippedCount++;
+                continue;
+            }
+            
+            // Double-check with JSON.stringify as a final validation
+            try {
+                const serialized = JSON.stringify(currentValue);
+                // Additional check for extremely large serialized data
+                if (serialized.length > 50000) { // 50KB limit
+                    console.warn(`Setting ${key} serializes to ${serialized.length} characters, too large, skipping`);
+                    skippedCount++;
+                    continue;
+                }
+            } catch (serializeError) {
+                console.warn(`Setting ${key} contains non-serializable data, skipping: ${serializeError.message}`);
+                skippedCount++;
+                continue;
+            }
+            
+            if (config.scope === "client") {
+                settings.client[key] = currentValue;
+            } else if (config.scope === "world") {
+                settings.world[key] = currentValue;
+            }
+            
+            // Store setting metadata for display
+            settings.settingsInfo[key] = {
+                name: config.name || key,
+                scope: config.scope,
+                namespace: namespace,
+                hint: config.hint || ""
+            };
+            
+            processedCount++;
+        } catch (error) {
+            console.warn(`Failed to process setting ${key}:`, error);
+            skippedCount++;
+        }
+    }
+    
+    const clientCount = Object.keys(settings.client).length;
+    const worldCount = Object.keys(settings.world).length;
+    console.log(`Settings Profile Manager: Successfully loaded ${processedCount} settings (${clientCount} client, ${worldCount} world), skipped ${skippedCount}, excluded ${excludedCount}`);
+    
+    return settings;
+}
+
+// Determines what scopes are available to the current user
+function getAvailableScopes() {
+    const scopes = [
+        { value: "client", label: "Client Settings (Per-User)", available: true }
+    ];
+    
+    if (game.user.isGM) {
+        scopes.push(
+            { value: "world", label: "World Settings (Global)", available: true },
+            { value: "both", label: "Both Client & World Settings", available: true }
+        );
+    } else {
+        scopes.push(
+            { value: "world", label: "World Settings (GM Only)", available: false },
+            { value: "both", label: "Both Client & World Settings (GM Only)", available: false }
+        );
+    }
+    
+    return scopes;
+}
+
+class SettingsProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
     static DEFAULT_OPTIONS = {
-        id: "settings-manager",
+        id: "settings-profiles-manager",
         window: {
-            title: "Settings Manager",
+            title: "Settings Profiles Manager",
             icon: "fas fa-cogs",
             resizable: true
         },
         position: {
-            width: 600,
-            height: 750
+            width: 700,
+            height: 900
         },
-        classes: ["settings-manager"],
+        classes: ["settings-profiles-manager"],
         modal: false
     };
 
+    static FLAG_SCOPE = game.system.id;
+    static FLAG_KEY = "settings-profiles-data";
+
     constructor() {
         super();
-        this.selectedTokens = [];
-        this.currentState = {
-            activeSection: null,
-            selectedModules: new Set(),
-            exportData: null
-        };
+        this.profiles = {};
+        this.selectedProfile = null;
+        this.macroDocument = null;
+        this.currentSettings = null;
+        this.loadProfiles();
+        this.refreshCurrentSettings();
     }
 
     async _prepareContext(options) {
+        const availableScopes = getAvailableScopes();
+        const accessibleScopes = availableScopes.filter(s => s.available);
+        
         return {
-            currentState: this.currentState,
-            scopes: [
-                { value: "client", label: "Client Settings (Per-User)" },
-                { value: "world", label: "World Settings (Global)" },
-                { value: "both", label: "Both Client & World Settings" }
-            ],
-            exportTypes: [
-                { value: "all", label: "All Settings" },
-                { value: "selective", label: "Select by Module" }
-            ],
-            importMethods: [
-                { value: "file", label: "Upload JSON File" },
-                { value: "paste", label: "Paste JSON Text" }
-            ]
+            profiles: this.profiles,
+            profileNames: Object.keys(this.profiles).sort(),
+            selectedProfile: this.selectedProfile,
+            availableScopes: availableScopes,
+            accessibleScopes: accessibleScopes,
+            isGM: game.user.isGM,
+            hasPersistence: !!this.macroDocument,
+            currentSettings: this.currentSettings
         };
     }
 
     async _renderHTML(context, options) {
+        const profileOptions = context.profileNames.map(name => {
+            const profile = this.profiles[name];
+            const scopeLabel = this.getScopeLabel(profile.scope);
+            const isAccessible = this.isProfileAccessible(profile);
+            
+            return `<option value="${name}" ${context.selectedProfile === name ? 'selected' : ''}
+                        ${isAccessible ? '' : 'disabled'} data-scope="${profile.scope}">
+                        ${name} ${scopeLabel}
+                    </option>`;
+        }).join('');
+
+        const scopeOptions = context.availableScopes.map(scope => 
+            `<option value="${scope.value}" ${scope.available ? '' : 'disabled'}>
+                ${scope.label}
+            </option>`
+        ).join('');
+
         return `
-            <form class="settings-manager-form">
-                <!-- Header -->
+            <form class="settings-profiles-form">
                 <div class="header-section">
-                    <h2>Foundry VTT Settings Manager</h2>
-                    <p class="subtitle">Export and Import your client settings</p>
-                </div>
-
-                <!-- Settings Scope Selection -->
-                <div class="form-group">
-                    <label class="form-label">Settings Scope:</label>
-                    <select id="settings-scope" class="form-select">
-                        ${context.scopes.map(scope => 
-                            `<option value="${scope.value}">${scope.label}</option>`
-                        ).join('')}
-                    </select>
-                    <div class="help-text">
-                        <strong>Client:</strong> Settings each player can adjust individually<br>
-                        <strong>World:</strong> Global settings (usually GM-only)
+                    <h2>Settings Profiles Manager</h2>
+                    <p class="subtitle">Save, manage, and switch between settings configurations</p>
+                    <div class="stats">
+                        <span class="stat-item">
+                            <i class="fas fa-cogs"></i>
+                            ${Object.keys(context.currentSettings?.client || {}).length} Client Settings
+                        </span>
+                        ${context.isGM ? `
+                        <span class="stat-item">
+                            <i class="fas fa-globe"></i>
+                            ${Object.keys(context.currentSettings?.world || {}).length} World Settings
+                        </span>` : ''}
+                        <span class="stat-item">
+                            <i class="fas fa-layer-group"></i>
+                            ${context.profileNames.length} Saved Profiles
+                        </span>
+                        <span class="stat-item ${context.hasPersistence ? 'persistence-ok' : 'persistence-warning'}">
+                            <i class="fas fa-${context.hasPersistence ? 'save' : 'exclamation-triangle'}"></i>
+                            ${context.hasPersistence ? 'Persistent Storage' : 'Temporary Only'}
+                        </span>
                     </div>
                 </div>
 
-                <!-- Action Buttons -->
-                <div class="action-buttons">
-                    <button type="button" id="export-btn" class="btn btn-primary">
-                        <i class="fas fa-upload"></i> Export Settings
-                    </button>
-                    <button type="button" id="import-btn" class="btn btn-secondary">
-                        <i class="fas fa-download"></i> Import Settings
-                    </button>
-                </div>
-
-                <!-- Export Section -->
-                <div id="export-section" class="section hidden">
-                    <h3 class="section-title">Export Options</h3>
+                <div class="profiles-section">
+                    <h3 class="section-title">Saved Profiles</h3>
                     
-                    <div class="form-group">
-                        <label class="form-label">Export Type:</label>
-                        <select id="export-type" class="form-select">
-                            ${context.exportTypes.map(type => 
-                                `<option value="${type.value}">${type.label}</option>`
-                            ).join('')}
-                        </select>
-                    </div>
-
-                    <div id="module-selector" class="module-selector hidden">
-                        <label class="form-label">Select Modules:</label>
-                        <div class="legend">
-                            <span class="legend-item">
-                                <span class="status-indicator active"></span> ACTIVE
-                            </span>
-                            <span class="legend-item">
-                                <span class="status-indicator inactive"></span> INACTIVE
-                            </span>
-                            <span class="legend-item">
-                                <span class="status-indicator core"></span> CORE
-                            </span>
-                            <p class="legend-help">Active modules are pre-selected. Use "Select Active Only" for common exports.</p>
-                        </div>
-                        <div class="module-list" id="module-checkboxes"></div>
-                        <div class="module-actions">
-                            <button type="button" id="select-active-modules" class="btn btn-small btn-success">Select Active Only</button>
-                            <button type="button" id="select-all-modules" class="btn btn-small">Select All</button>
-                            <button type="button" id="deselect-all-modules" class="btn btn-small">Deselect All</button>
+                    <div class="profile-controls">
+                        <div class="profile-selector-group">
+                            <select id="profile-selector" class="form-select">
+                                <option value="">Select a profile...</option>
+                                ${profileOptions}
+                            </select>
+                            <button type="button" id="load-profile-btn" class="btn btn-secondary" disabled>
+                                <i class="fas fa-play"></i> Apply
+                            </button>
+                            <button type="button" id="delete-profile-btn" class="btn btn-danger" disabled>
+                                <i class="fas fa-trash"></i> Delete
+                            </button>
                         </div>
                     </div>
 
-                    <div class="export-actions">
-                        <button type="button" id="download-json" class="btn btn-warning">
-                            <i class="fas fa-save"></i> Download as File
-                        </button>
-                        <button type="button" id="copy-clipboard" class="btn btn-info">
-                            <i class="fas fa-copy"></i> Copy to Clipboard
-                        </button>
-                    </div>
-
-                    <div id="export-results" class="results-area hidden">
-                        <label class="form-label">Exported JSON:</label>
-                        <textarea id="export-json" class="json-output" readonly></textarea>
+                    <div id="profile-details" class="profile-details hidden">
+                        <div id="profile-info"></div>
+                        <div id="profile-changes" class="changes-preview"></div>
                     </div>
                 </div>
 
-                <!-- Import Section -->
-                <div id="import-section" class="section hidden">
-                    <h3 class="section-title">Import Settings</h3>
+                <div class="save-section">
+                    <h3 class="section-title">Save Current Configuration</h3>
                     
                     <div class="form-group">
-                        <label class="form-label">Import Method:</label>
-                        <select id="import-method" class="form-select">
-                            ${context.importMethods.map(method => 
-                                `<option value="${method.value}">${method.label}</option>`
-                            ).join('')}
+                        <label class="form-label">Settings Scope:</label>
+                        <select id="settings-scope" class="form-select">
+                            ${scopeOptions}
                         </select>
+                        <div class="help-text">
+                            <strong>Client:</strong> Settings each player can adjust individually (localStorage)<br>
+                            <strong>World:</strong> Global settings shared across all users (requires GM)<br>
+                            ${!context.isGM ? '<em style="color: #ff6b6b;">World settings require GM permissions</em>' : ''}
+                        </div>
                     </div>
 
-                    <div id="file-upload" class="form-group">
-                        <label class="form-label">Select File:</label>
-                        <input type="file" id="import-file" accept=".json" class="file-input">
+                    <div class="form-group">
+                        <label class="form-label">Profile Name:</label>
+                        <input type="text" id="new-profile-name" class="form-input" placeholder="My Settings Configuration" />
+                        <div class="help-text">
+                            Choose a descriptive name for your current settings configuration.
+                        </div>
                     </div>
 
-                    <div id="paste-area" class="form-group hidden">
-                        <label class="form-label">Paste JSON:</label>
-                        <textarea id="import-json" class="json-input" placeholder="Paste your exported JSON here..."></textarea>
+                    <div class="current-settings-preview">
+                        <h4>Current Settings Preview:</h4>
+                        <div id="current-settings-list" class="settings-list"></div>
                     </div>
 
-                    <button type="button" id="process-import" class="btn btn-danger">
-                        <i class="fas fa-exclamation-triangle"></i> Import Settings (This will overwrite current settings!)
+                    <button type="button" id="save-profile-btn" class="btn btn-primary">
+                        <i class="fas fa-save"></i> Save Current Configuration as Profile
                     </button>
-
-                    <div id="import-results" class="results-area hidden"></div>
                 </div>
 
-                <!-- Warning -->
+                <div class="import-export-section">
+                    <h3 class="section-title">Import/Export</h3>
+                    
+                    <div class="import-export-controls">
+                        <button type="button" id="export-profiles-btn" class="btn btn-info">
+                            <i class="fas fa-download"></i> Export All Profiles
+                        </button>
+                        <button type="button" id="import-profiles-btn" class="btn btn-warning">
+                            <i class="fas fa-upload"></i> Import Profiles
+                        </button>
+                    </div>
+                    
+                    <div id="import-area" class="import-area hidden">
+                        <div class="form-group">
+                            <label class="form-label">Import Method:</label>
+                            <select id="import-method" class="form-select">
+                                <option value="file">Upload JSON File</option>
+                                <option value="paste">Paste JSON Text</option>
+                            </select>
+                        </div>
+
+                        <div id="file-upload" class="form-group">
+                            <input type="file" id="import-file" accept=".json" class="file-input">
+                        </div>
+
+                        <div id="paste-area" class="form-group hidden">
+                            <textarea id="import-json" class="json-input" placeholder="Paste exported profiles JSON here..."></textarea>
+                        </div>
+
+                        <div class="import-actions">
+                            <button type="button" id="process-import-btn" class="btn btn-success">
+                                <i class="fas fa-check"></i> Import Profiles
+                            </button>
+                            <button type="button" id="cancel-import-btn" class="btn btn-secondary">
+                                <i class="fas fa-times"></i> Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="warning-box">
-                    <strong>⚠️ Important:</strong> Always backup your current settings before importing new ones. 
-                    Settings changes may require a page refresh to take full effect.
-                    <br><strong>Note:</strong> World settings require GM permissions to export/import.
-                    <br><strong>Filtering:</strong> Only settings from active modules and registered settings are shown to prevent errors.
+                    <strong>⚠️ Important:</strong> Settings changes may require a page refresh to take full effect.
+                    <br><strong>Persistence:</strong> Profiles are saved as flags on the macro document. Delete macro = lose profiles.
+                    <br><strong>Permissions:</strong> World settings require GM permissions. Non-GMs can only manage client settings.
+                    <br><strong>Note:</strong> Some complex settings are automatically excluded for stability.
                 </div>
             </form>
 
             <style>
-                .settings-manager {
+                .settings-profiles-manager {
                     font-family: var(--font-primary);
                 }
 
-                .settings-manager-form {
+                .settings-profiles-form {
                     height: 100%;
                     padding: 15px;
                     display: flex;
@@ -201,6 +462,7 @@ class SettingsManagerApp extends foundry.applications.api.ApplicationV2 {
                     gap: 15px;
                     background: var(--color-bg);
                     color: var(--color-text-primary);
+                    overflow-y: auto;
                 }
 
                 .header-section {
@@ -208,6 +470,7 @@ class SettingsManagerApp extends foundry.applications.api.ApplicationV2 {
                     border-bottom: 1px solid var(--color-border);
                     padding-bottom: 12px;
                     margin-bottom: 8px;
+                    flex-shrink: 0;
                 }
 
                 .header-section h2 {
@@ -217,91 +480,139 @@ class SettingsManagerApp extends foundry.applications.api.ApplicationV2 {
                 }
 
                 .subtitle {
-                    margin: 0;
+                    margin: 0 0 10px 0;
                     font-size: 13px;
                     color: var(--color-text-dark-secondary);
+                }
+
+                .stats {
+                    display: flex;
+                    justify-content: center;
+                    gap: 15px;
+                    margin-top: 8px;
+                    flex-wrap: wrap;
+                }
+
+                .stat-item {
+                    font-size: 12px;
+                    color: var(--color-text-dark-secondary);
+                    display: flex;
+                    align-items: center;
+                    gap: 4px;
+                }
+
+                .stat-item.persistence-ok {
+                    color: #51cf66;
+                }
+
+                .stat-item.persistence-warning {
+                    color: #ff6b6b;
+                }
+
+                .profiles-section, .save-section, .import-export-section {
+                    border: 1px solid var(--color-border);
+                    border-radius: 6px;
+                    padding: 16px;
+                    background: var(--color-bg-option);
+                    flex-shrink: 0;
+                }
+
+                .section-title {
+                    margin: 0 0 16px 0;
+                    color: var(--color-text-primary);
+                    font-size: 16px;
+                    font-weight: bold;
                 }
 
                 .form-group {
                     display: flex;
                     flex-direction: column;
                     gap: 8px;
-                    margin-bottom: 12px;
+                    margin-bottom: 16px;
                 }
 
                 .form-label {
                     font-weight: bold;
                     color: var(--color-text-primary);
                     font-size: 14px;
-                    margin-bottom: 4px;
                 }
 
-                .form-select, .file-input {
-                    padding: 8px 12px;
-                    border: 1px solid var(--color-border);
+                .form-input, .form-select {
+                    padding: 8px;
+                    border: 1px solid var(--color-text-secondary);
                     border-radius: 4px;
-                    background: var(--color-bg);
                     color: var(--color-text-primary);
-                    font-family: var(--font-primary);
                     font-size: 14px;
-                    line-height: 1.4;
-                    height: auto;
                     min-height: 36px;
                 }
 
-                .form-select:focus, .file-input:focus {
+                .file-input {
+                    width: 100%;
+                    padding: 8px;
+                    border: 1px solid var(--color-text-secondary);
+                    border-radius: 4px;
+                    color: var(--color-text-primary);
+                    font-size: 14px;
+                    min-height: 36px;
+                }
+
+                .json-input {
+                    height: 120px;
+                    font-family: "Consolas", "Monaco", "Courier New", monospace;
+                    font-size: 11px;
+                    padding: 10px;
+                    border: 1px solid var(--color-text-secondary);
+                    border-radius: 4px;
+                    background: var(--color-bg-primary);
+                    color: var(--color-text-primary);
+                    resize: vertical;
+                    line-height: 1.4;
+                }
+
+                .form-input:focus, .form-select:focus, .file-input:focus, .json-input:focus {
                     border-color: var(--color-border-highlight);
                     outline: none;
                     box-shadow: 0 0 0 2px rgba(73, 144, 226, 0.2);
                 }
 
-                /* Fix dropdown option colors */
-                .form-select option {
-                    background: var(--color-bg);
-                    color: var(--color-text-primary);
-                    padding: 8px;
-                }
-
                 .help-text {
                     font-size: 12px;
                     color: var(--color-text-dark-secondary);
-                    background: var(--color-bg-option);
-                    padding: 10px;
+                    background: var(--color-bg);
+                    padding: 8px;
                     border-radius: 4px;
                     border: 1px solid var(--color-border);
-                    margin-top: 4px;
                     line-height: 1.4;
                 }
 
-                .action-buttons {
-                    display: grid;
-                    grid-template-columns: 1fr 1fr;
-                    gap: 12px;
-                    margin: 16px 0;
-                }
-
                 .btn {
-                    padding: 10px 16px;
+                    padding: 8px 12px;
                     border: 1px solid var(--color-border);
                     border-radius: 4px;
                     cursor: pointer;
                     font-weight: bold;
-                    font-size: 14px;
+                    font-size: 13px;
                     background: var(--color-bg);
                     color: var(--color-text-primary);
                     transition: all 0.2s ease;
                     display: flex;
                     align-items: center;
                     justify-content: center;
-                    gap: 6px;
-                    min-height: 40px;
+                    gap: 4px;
+                    min-height: 36px;
+                    white-space: nowrap;
                 }
 
-                .btn:hover {
+                .btn:hover:not(:disabled) {
                     background: var(--color-bg-option);
                     border-color: var(--color-border-highlight);
                     transform: translateY(-1px);
                     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                }
+
+                .btn:disabled {
+                    opacity: 0.5;
+                    cursor: not-allowed;
                 }
 
                 .btn-primary {
@@ -340,148 +651,141 @@ class SettingsManagerApp extends foundry.applications.api.ApplicationV2 {
                     border-color: #45a049;
                 }
 
-                .btn-small {
-                    padding: 6px 10px;
-                    font-size: 11px;
-                    min-height: 32px;
+                .profile-controls {
+                    margin-bottom: 16px;
                 }
 
-                .section {
+                .profile-selector-group {
+                    display: grid;
+                    grid-template-columns: 1fr auto auto;
+                    gap: 8px;
+                    align-items: center;
+                }
+
+                select option:disabled {
+                    color: #999;
+                    font-style: italic;
+                }
+
+                .profile-details {
+                    background: var(--color-bg);
                     border: 1px solid var(--color-border);
-                    border-radius: 6px;
-                    padding: 16px;
-                    background: var(--color-bg-option);
-                    margin: 12px 0;
+                    border-radius: 4px;
+                    padding: 12px;
+                    margin-top: 12px;
                 }
 
-                .section-title {
-                    margin: 0 0 16px 0;
+                .current-settings-preview {
+                    margin: 16px 0;
+                    padding: 12px;
+                    background: var(--color-bg);
+                    border: 1px solid var(--color-border);
+                    border-radius: 4px;
+                }
+
+                .current-settings-preview h4 {
+                    margin: 0 0 12px 0;
+                    font-size: 14px;
                     color: var(--color-text-primary);
-                    font-size: 18px;
+                }
+
+                .settings-list {
+                    max-height: 150px;
+                    overflow-y: auto;
+                }
+
+                .setting-item {
+                    display: flex;
+                    align-items: flex-start;
+                    gap: 8px;
+                    padding: 6px 8px;
+                    margin: 2px 0;
+                    background: var(--color-bg-option);
+                    border-radius: 3px;
+                    font-size: 11px;
+                }
+
+                .setting-scope {
+                    flex-shrink: 0;
+                    padding: 2px 6px;
+                    border-radius: 10px;
+                    font-size: 9px;
                     font-weight: bold;
+                    text-transform: uppercase;
+                }
+
+                .setting-scope.client {
+                    background: #e3f2fd;
+                    color: #1976d2;
+                }
+
+                .setting-scope.world {
+                    background: #f3e5f5;
+                    color: #7b1fa2;
+                }
+
+                .setting-info {
+                    flex: 1;
+                    min-width: 0;
+                }
+
+                .setting-name {
+                    font-weight: bold;
+                    color: var(--color-text-primary);
+                    margin-bottom: 2px;
+                }
+
+                .setting-key {
+                    color: var(--color-text-dark-secondary);
+                    font-family: "Consolas", "Monaco", "Courier New", monospace;
+                    font-size: 9px;
+                }
+
+                .changes-preview {
+                    max-height: 150px;
+                    overflow-y: auto;
+                    margin-top: 12px;
+                }
+
+                .change-item {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    padding: 4px 8px;
+                    margin: 2px 0;
+                    font-size: 11px;
+                    border-radius: 3px;
+                }
+
+                .change-item.modify {
+                    background: rgba(255, 152, 0, 0.1);
+                    color: #f57c00;
+                }
+
+                .import-export-controls {
+                    display: grid;
+                    grid-template-columns: 1fr 1fr;
+                    gap: 12px;
+                    margin-bottom: 16px;
+                }
+
+                .import-area {
+                    background: var(--color-bg);
+                    border: 1px solid var(--color-border);
+                    border-radius: 4px;
+                    padding: 16px;
+                    margin-top: 12px;
+                }
+
+                .import-actions {
+                    display: grid;
+                    grid-template-columns: 1fr 1fr;
+                    gap: 8px;
+                    margin-top: 12px;
                 }
 
                 .hidden {
                     display: none !important;
-                }
-
-                .legend {
-                    margin-bottom: 15px;
-                    font-size: 11px;
-                    color: var(--color-text-dark-secondary);
-                }
-
-                .legend-item {
-                    display: inline-flex;
-                    align-items: center;
-                    margin-right: 16px;
-                }
-
-                .status-indicator {
-                    width: 8px;
-                    height: 8px;
-                    border-radius: 50%;
-                    margin-right: 4px;
-                }
-
-                .status-indicator.active {
-                    background: #51cf66;
-                }
-
-                .status-indicator.inactive {
-                    background: #ff6b6b;
-                }
-
-                .status-indicator.core {
-                    background: #339af0;
-                }
-
-                .legend-help {
-                    margin: 4px 0 0 0;
-                    font-style: italic;
-                }
-
-                .module-list {
-                    max-height: 200px;
-                    overflow-y: auto;
-                    border: 1px solid var(--color-border);
-                    padding: 10px;
-                    background: var(--color-bg);
-                    border-radius: 4px;
-                    margin-bottom: 10px;
-                }
-
-                .module-item {
-                    display: flex;
-                    align-items: center;
-                    padding: 6px;
-                    margin: 3px 0;
-                    border-radius: 3px;
-                    cursor: pointer;
-                }
-
-                .module-item:hover {
-                    background: var(--color-bg-option);
-                }
-
-                .module-checkbox {
-                    margin-right: 8px;
-                }
-
-                .module-info {
-                    flex: 1;
-                    display: flex;
-                    flex-direction: column;
-                }
-
-                .module-name {
-                    font-weight: bold;
-                    color: var(--color-text-primary);
-                }
-
-                .module-details {
-                    font-size: 10px;
-                    color: var(--color-text-dark-secondary);
-                }
-
-                .module-actions {
-                    display: flex;
-                    gap: 8px;
-                    margin-top: 8px;
-                    flex-wrap: wrap;
-                }
-
-                .export-actions {
-                    display: flex;
-                    gap: 12px;
-                    margin: 16px 0;
-                }
-
-                .export-actions .btn {
-                    flex: 1;
-                }
-
-                .results-area {
-                    margin-top: 16px;
-                }
-
-                .json-output, .json-input {
-                    width: 100%;
-                    height: 120px;
-                    font-family: "Consolas", "Monaco", "Courier New", monospace;
-                    font-size: 11px;
-                    padding: 10px;
-                    border: 1px solid var(--color-border);
-                    border-radius: 4px;
-                    background: var(--color-bg);
-                    color: var(--color-text-primary);
-                    resize: vertical;
-                    line-height: 1.4;
-                }
-
-                .json-output:focus, .json-input:focus {
-                    border-color: var(--color-border-highlight);
-                    outline: none;
                 }
 
                 .warning-box {
@@ -492,12 +796,13 @@ class SettingsManagerApp extends foundry.applications.api.ApplicationV2 {
                     font-size: 12px;
                     color: #856404;
                     margin-top: auto;
+                    flex-shrink: 0;
+                    line-height: 1.4;
                 }
             </style>
         `;
     }
 
-    // CRITICAL: This method was missing in previous attempts!
     async _replaceHTML(result, content, options) {
         content.innerHTML = result;
     }
@@ -505,568 +810,669 @@ class SettingsManagerApp extends foundry.applications.api.ApplicationV2 {
     _onRender(context, options) {
         super._onRender(context, options);
         this.setupEventHandlers();
+        this.updateCurrentSettingsList();
+        this.updateProfileDetails();
     }
 
     setupEventHandlers() {
-        const exportBtn = this.element.querySelector('#export-btn');
-        const importBtn = this.element.querySelector('#import-btn');
-        const exportSection = this.element.querySelector('#export-section');
-        const importSection = this.element.querySelector('#import-section');
-        const exportType = this.element.querySelector('#export-type');
-        const moduleSelector = this.element.querySelector('#module-selector');
-        const importMethod = this.element.querySelector('#import-method');
-        const fileUpload = this.element.querySelector('#file-upload');
-        const pasteArea = this.element.querySelector('#paste-area');
-        const settingsScope = this.element.querySelector('#settings-scope');
-
-        // Toggle sections
-        exportBtn.addEventListener('click', () => {
-            this.toggleSection(exportSection, importSection);
-            if (!exportSection.classList.contains('hidden')) {
-                this.populateModuleSelector();
-            }
+        this.element.querySelector('#profile-selector')?.addEventListener('change', (e) => {
+            this.selectedProfile = e.target.value || null;
+            this.updateProfileButtons();
+            this.updateProfileDetails();
         });
 
-        importBtn.addEventListener('click', () => {
-            this.toggleSection(importSection, exportSection);
+        this.element.querySelector('#settings-scope')?.addEventListener('change', () => {
+            this.updateCurrentSettingsList();
         });
 
-        // Export type change
-        exportType.addEventListener('change', () => {
-            if (exportType.value === 'selective') {
-                moduleSelector.classList.remove('hidden');
-                this.populateModuleSelector();
-            } else {
-                moduleSelector.classList.add('hidden');
-            }
-        });
+        this.element.querySelector('#load-profile-btn')?.addEventListener('click', () => this.applyProfile());
+        this.element.querySelector('#delete-profile-btn')?.addEventListener('click', () => this.deleteProfile());
+        this.element.querySelector('#save-profile-btn')?.addEventListener('click', () => this.saveProfile());
 
-        // Import method change
-        importMethod.addEventListener('change', () => {
-            if (importMethod.value === 'file') {
-                fileUpload.classList.remove('hidden');
-                pasteArea.classList.add('hidden');
-            } else {
-                fileUpload.classList.add('hidden');
-                pasteArea.classList.remove('hidden');
-            }
-        });
+        this.element.querySelector('#export-profiles-btn')?.addEventListener('click', () => this.exportProfiles());
+        this.element.querySelector('#import-profiles-btn')?.addEventListener('click', () => this.showImportArea());
+        this.element.querySelector('#import-method')?.addEventListener('change', () => this.toggleImportMethod());
+        this.element.querySelector('#process-import-btn')?.addEventListener('click', () => this.importProfiles());
+        this.element.querySelector('#cancel-import-btn')?.addEventListener('click', () => this.hideImportArea());
 
-        // Settings scope change
-        settingsScope.addEventListener('change', () => {
-            if (!moduleSelector.classList.contains('hidden')) {
-                this.populateModuleSelector();
-            }
-        });
-
-        // Export actions
-        this.element.querySelector('#download-json')?.addEventListener('click', () => this.downloadSettings());
-        this.element.querySelector('#copy-clipboard')?.addEventListener('click', () => this.copySettingsToClipboard());
-
-        // Import action
-        this.element.querySelector('#process-import')?.addEventListener('click', () => this.processImport());
-
-        // Module selector actions
-        this.element.querySelector('#select-active-modules')?.addEventListener('click', () => this.selectActiveModules());
-        this.element.querySelector('#select-all-modules')?.addEventListener('click', () => this.selectAllModules());
-        this.element.querySelector('#deselect-all-modules')?.addEventListener('click', () => this.deselectAllModules());
+        this.updateProfileButtons();
     }
 
-    toggleSection(showSection, hideSection) {
-        showSection.classList.toggle('hidden');
-        hideSection.classList.add('hidden');
-    }
-
-    getAllSettings(scope = "client") {
+    loadProfiles() {
         try {
-            // Check permissions for world settings
-            if ((scope === "world" || scope === "both") && !game.user.isGM) {
-                if (scope === "world") {
-                    throw new Error("Only GMs can access world settings");
-                }
-                // For "both" scope, fall back to client only if not GM
-                scope = "client";
-                ui.notifications.warn("World settings require GM permissions. Showing client settings only.");
+            this.macroDocument = game.macros.find(m => 
+                m.command?.includes("SettingsProfilesManagerApp") || 
+                m.command?.includes("showSettingsProfilesManager")
+            );
+            
+            if (!this.macroDocument) {
+                this.profiles = {};
+                return;
             }
+
+            // Try to load from primary storage
+            let savedData = this.macroDocument.getFlag(SettingsProfilesManagerApp.FLAG_SCOPE, SettingsProfilesManagerApp.FLAG_KEY);
             
-            const allSettings = {};
-            const scopes = scope === "both" ? ["client", "world"] : [scope];
-            
-            for (const currentScope of scopes) {
-                const storage = game.settings.storage.get(currentScope);
-                const scopeSettings = {};
-                
-                if (currentScope === "client") {
-                    // Client storage uses localStorage API
-                    for (let i = 0; i < storage.length; i++) {
-                        const key = storage.key(i);
-                        const value = storage.getItem(key);
-                        
-                        // Try to parse the value as JSON (settings are usually stored as JSON strings)
-                        try {
-                            scopeSettings[key] = JSON.parse(value);
-                        } catch (e) {
-                            // If it's not JSON, store as is
-                            scopeSettings[key] = value;
-                        }
+            // If primary storage fails, try fallback JSON storage
+            if (!savedData) {
+                const jsonString = this.macroDocument.getFlag(SettingsProfilesManagerApp.FLAG_SCOPE, SettingsProfilesManagerApp.FLAG_KEY + "-json");
+                if (jsonString) {
+                    console.log("Settings Profile Manager: Loading profiles from fallback JSON storage");
+                    try {
+                        this.profiles = JSON.parse(jsonString);
+                        return;
+                    } catch (parseError) {
+                        console.error("Settings Profile Manager: Failed to parse fallback JSON storage:", parseError);
+                        this.profiles = {};
+                        return;
                     }
-                } else if (currentScope === "world") {
-                    // World storage is a Collection of Setting documents
-                    for (const setting of storage.contents) {
-                        const key = `${setting.namespace}.${setting.key}`;
-                        scopeSettings[key] = setting.value;
-                    }
-                }
-                
-                // Add scope prefix to avoid conflicts when scope is "both"
-                if (scope === "both") {
-                    for (const [key, value] of Object.entries(scopeSettings)) {
-                        allSettings[`${currentScope}:${key}`] = value;
-                    }
-                } else {
-                    Object.assign(allSettings, scopeSettings);
                 }
             }
             
-            return allSettings;
+            if (savedData && savedData.profiles) {
+                // Process loaded profiles and restore original setting keys
+                this.profiles = {};
+                for (const [profileName, profile] of Object.entries(savedData.profiles)) {
+                    this.profiles[profileName] = {
+                        ...profile,
+                        clientSettings: {},
+                        worldSettings: {}
+                    };
+                    
+                    // Restore original keys (convert _DOT_ back to .)
+                    for (const [safeKey, value] of Object.entries(profile.clientSettings || {})) {
+                        const originalKey = safeKey.replace(/_DOT_/g, '.');
+                        this.profiles[profileName].clientSettings[originalKey] = value;
+                    }
+                    
+                    for (const [safeKey, value] of Object.entries(profile.worldSettings || {})) {
+                        const originalKey = safeKey.replace(/_DOT_/g, '.');
+                        this.profiles[profileName].worldSettings[originalKey] = value;
+                    }
+                }
+                
+                console.log(`Settings Profile Manager: Loaded ${Object.keys(this.profiles).length} profiles from flags`);
+            } else {
+                this.profiles = {};
+            }
         } catch (error) {
-            console.error("Error getting all settings:", error);
+            console.error("Settings Profile Manager: Error loading profiles:", error);
+            this.profiles = {};
+        }
+    }
+
+    async saveProfiles() {
+        try {
+            if (!this.macroDocument) {
+                ui.notifications.warn("No macro document found - profiles will be lost when page refreshes. Run this from a saved macro for persistence.");
+                return;
+            }
+
+            // Use simple JSON string storage to avoid flag complexity
+            const jsonString = JSON.stringify(this.profiles, null, 2);
+            
+            // Check size before saving
+            if (jsonString.length > 100000) { // 100KB limit
+                ui.notifications.error("Profile data too large to save. Consider reducing the number of profiles or settings.");
+                return;
+            }
+            
+            await this.macroDocument.setFlag(SettingsProfilesManagerApp.FLAG_SCOPE, SettingsProfilesManagerApp.FLAG_KEY + "-json", jsonString);
+            console.log("Settings Profile Manager: Successfully saved profiles using JSON storage");
+            
+        } catch (error) {
+            console.error("Settings Profile Manager: Error saving profiles:", error);
+            ui.notifications.error("Failed to save profiles - check console for details");
             throw error;
         }
     }
 
-    populateModuleSelector() {
-        try {
-            const scope = this.element.querySelector('#settings-scope').value;
-            const allSettings = this.getAllSettings(scope);
-            const moduleCheckboxes = this.element.querySelector('#module-checkboxes');
-            
-            // Group settings by namespace (module)
-            const settingsByModule = {};
-            for (const [key, value] of Object.entries(allSettings)) {
-                // Handle scope prefixes when scope is "both"
-                let actualKey = key;
-                let scopePrefix = "";
-                
-                if (scope === "both" && (key.startsWith("client:") || key.startsWith("world:"))) {
-                    const parts = key.split(":", 2);
-                    scopePrefix = parts[0];
-                    actualKey = parts[1];
-                }
-                
-                const namespace = actualKey.split('.')[0];
-                const moduleKey = scope === "both" ? `${scopePrefix}:${namespace}` : namespace;
-                
-                if (!settingsByModule[moduleKey]) {
-                    settingsByModule[moduleKey] = {};
-                }
-                settingsByModule[moduleKey][key] = value;
-            }
-            
-            // Create module items
-            const moduleItems = Object.keys(settingsByModule).sort().map(moduleKey => {
-                const count = Object.keys(settingsByModule[moduleKey]).length;
-                
-                let displayName = moduleKey;
-                let scopeInfo = "";
-                let moduleStatus = "";
-                let statusClass = "";
-                
-                // Handle scope prefixes
-                if (scope === "both") {
-                    if (moduleKey.startsWith("client:")) {
-                        displayName = moduleKey.substring(7);
-                        scopeInfo = ' (Client)';
-                    } else if (moduleKey.startsWith("world:")) {
-                        displayName = moduleKey.substring(6);
-                        scopeInfo = ' (World)';
-                    }
-                }
-                
-                // Check module status
-                if (displayName !== 'core') {
-                    const module = game.modules.get(displayName);
-                    if (!module) {
-                        moduleStatus = ' - Not Found';
-                        statusClass = 'inactive';
-                    } else if (!module.active) {
-                        moduleStatus = ' - Inactive';
-                        statusClass = 'inactive';
-                    } else {
-                        moduleStatus = ' - Active';
-                        statusClass = 'active';
-                    }
-                } else {
-                    moduleStatus = ' - Core';
-                    statusClass = 'core';
-                }
-                
-                // Determine if pre-selected
-                const isChecked = displayName === 'core' || (game.modules.get(displayName)?.active);
+    refreshCurrentSettings() {
+        this.currentSettings = getAccessibleSettings();
+    }
+
+    getScopeLabel(scope) {
+        switch(scope) {
+            case 'client': return '(Client)';
+            case 'world': return '(World)';
+            case 'both': return '(Both)';
+            default: return '';
+        }
+    }
+
+    isProfileAccessible(profile) {
+        if (profile.scope === 'client') return true;
+        if (profile.scope === 'world' || profile.scope === 'both') {
+            return game.user.isGM;
+        }
+        return true;
+    }
+
+    updateCurrentSettingsList() {
+        const settingsList = this.element.querySelector('#current-settings-list');
+        if (!settingsList || !this.currentSettings) return;
+
+        const scope = this.element.querySelector('#settings-scope')?.value || 'client';
+        let settings = {};
+        
+        if (scope === 'client') {
+            settings = this.currentSettings.client;
+        } else if (scope === 'world') {
+            settings = this.currentSettings.world;
+        } else if (scope === 'both') {
+            settings = { ...this.currentSettings.client, ...this.currentSettings.world };
+        }
+
+        const settingsList_html = Object.entries(settings)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([key, value]) => {
+                const info = this.currentSettings.settingsInfo[key];
+                if (!info) return '';
                 
                 return `
-                    <div class="module-item">
-                        <input type="checkbox" class="module-checkbox" name="modules" value="${moduleKey}" ${isChecked ? 'checked' : ''}>
-                        <div class="module-info">
-                            <div class="module-name">
-                                <span class="status-indicator ${statusClass}"></span>
-                                ${displayName}${scopeInfo}
-                            </div>
-                            <div class="module-details">${count} settings${moduleStatus}</div>
+                    <div class="setting-item">
+                        <div class="setting-scope ${info.scope}">${info.scope.toUpperCase()}</div>
+                        <div class="setting-info">
+                            <div class="setting-name">${info.name}</div>
+                            <div class="setting-key">${key}</div>
                         </div>
                     </div>
                 `;
             }).join('');
+
+        settingsList.innerHTML = settingsList_html || '<p style="font-style: italic; color: var(--color-text-dark-secondary); padding: 8px;">No accessible settings found</p>';
+    }
+
+    updateProfileButtons() {
+        const loadBtn = this.element.querySelector('#load-profile-btn');
+        const deleteBtn = this.element.querySelector('#delete-profile-btn');
+        
+        const hasSelection = this.selectedProfile && this.profiles[this.selectedProfile];
+        const isAccessible = hasSelection ? this.isProfileAccessible(this.profiles[this.selectedProfile]) : false;
+        
+        if (loadBtn) loadBtn.disabled = !hasSelection || !isAccessible;
+        if (deleteBtn) deleteBtn.disabled = !hasSelection;
+    }
+
+    updateProfileDetails() {
+        const detailsElement = this.element.querySelector('#profile-details');
+        if (!detailsElement) return;
+
+        if (!this.selectedProfile || !this.profiles[this.selectedProfile]) {
+            detailsElement.classList.add('hidden');
+            return;
+        }
+
+        const profile = this.profiles[this.selectedProfile];
+        const infoElement = this.element.querySelector('#profile-info');
+        const changesElement = this.element.querySelector('#profile-changes');
+
+        const clientCount = Object.keys(profile.clientSettings || {}).length;
+        const worldCount = Object.keys(profile.worldSettings || {}).length;
+        const totalCount = clientCount + worldCount;
+
+        infoElement.innerHTML = `
+            <strong>Profile:</strong> ${profile.name}<br>
+            <strong>Created:</strong> ${new Date(profile.timestamp).toLocaleString()}<br>
+            <strong>Scope:</strong> ${profile.scope} ${this.getScopeLabel(profile.scope)}<br>
+            <strong>Settings:</strong> ${totalCount} total (${clientCount} client, ${worldCount} world)<br>
+            <strong>User:</strong> ${profile.user || 'Unknown'}<br>
+            ${!this.isProfileAccessible(profile) ? '<em style="color: #ff6b6b;">⚠️ This profile requires GM permissions</em>' : ''}
+        `;
+
+        // Show what would change if this profile is applied
+        const changes = [];
+        const allCurrentSettings = { ...this.currentSettings.client, ...this.currentSettings.world };
+        const allProfileSettings = { ...profile.clientSettings, ...profile.worldSettings };
+
+        for (const [key, profileValue] of Object.entries(allProfileSettings)) {
+            if (!isSettingAccessible(key)) continue;
             
-            moduleCheckboxes.innerHTML = moduleItems;
-            
-            // Add click handlers for module items
-            moduleCheckboxes.querySelectorAll('.module-item').forEach(item => {
-                item.addEventListener('click', (e) => {
-                    if (e.target.type !== 'checkbox') {
-                        const checkbox = item.querySelector('.module-checkbox');
-                        checkbox.checked = !checkbox.checked;
-                    }
+            const currentValue = allCurrentSettings[key];
+            if (JSON.stringify(currentValue) !== JSON.stringify(profileValue)) {
+                const info = this.currentSettings.settingsInfo[key];
+                changes.push({
+                    key: key,
+                    name: info?.name || key,
+                    scope: info?.scope || 'unknown',
+                    currentValue,
+                    profileValue
                 });
+            }
+        }
+
+        if (changes.length === 0) {
+            changesElement.innerHTML = '<p style="color: #51cf66; font-style: italic;">✓ No changes needed - profile matches current state!</p>';
+        } else {
+            const changesList = changes.slice(0, 10).map(change => 
+                `<div class="change-item modify">
+                    <i class="fas fa-edit"></i>
+                    <div class="setting-scope ${change.scope}">${change.scope.toUpperCase()}</div>
+                    <strong>${change.name}</strong>
+                    <span>→ MODIFY</span>
+                </div>`
+            ).join('');
+            
+            changesElement.innerHTML = `
+                <h5 style="margin: 0 0 8px 0; font-size: 12px;">Changes Required (${changes.length}):</h5>
+                ${changesList}
+                ${changes.length > 10 ? `<p style="font-size: 10px; color: var(--color-text-dark-secondary); margin: 4px 0;">...and ${changes.length - 10} more changes</p>` : ''}
+            `;
+        }
+
+        detailsElement.classList.remove('hidden');
+    }
+
+    async saveProfile() {
+        try {
+            const nameInput = this.element.querySelector('#new-profile-name');
+            const scopeSelect = this.element.querySelector('#settings-scope');
+            const profileName = nameInput.value.trim();
+            const scope = scopeSelect.value;
+
+            if (!profileName) {
+                ui.notifications.warn("Please enter a profile name");
+                nameInput.focus();
+                return;
+            }
+
+            if (!scope) {
+                ui.notifications.warn("Please select a settings scope");
+                return;
+            }
+
+            // Check if scope is accessible
+            const availableScopes = getAvailableScopes();
+            const scopeInfo = availableScopes.find(s => s.value === scope);
+            if (!scopeInfo || !scopeInfo.available) {
+                ui.notifications.error(`You don't have access to ${scope} settings`);
+                return;
+            }
+
+            if (this.profiles[profileName]) {
+                const overwrite = await foundry.applications.api.DialogV2.confirm({
+                    window: { title: "Profile Exists" },
+                    content: `<p>A profile named "<strong>${profileName}</strong>" already exists. Do you want to overwrite it?</p>`,
+                    rejectClose: false,
+                    modal: true
+                });
+                
+                if (!overwrite) return;
+            }
+
+            this.refreshCurrentSettings();
+            
+            const profileData = {
+                name: profileName,
+                scope: scope,
+                timestamp: new Date().toISOString(),
+                user: game.user.name,
+                foundryVersion: game.version,
+                clientSettings: {},
+                worldSettings: {}
+            };
+
+            if (scope === 'client' || scope === 'both') {
+                profileData.clientSettings = { ...this.currentSettings.client };
+            }
+            if (scope === 'world' || scope === 'both') {
+                profileData.worldSettings = { ...this.currentSettings.world };
+            }
+
+            this.profiles[profileName] = profileData;
+            await this.saveProfiles();
+            
+            nameInput.value = '';
+            this.selectedProfile = profileName;
+            await this.render();
+            
+            const settingsCount = Object.keys(profileData.clientSettings).length + Object.keys(profileData.worldSettings).length;
+            ui.notifications.info(`Profile "${profileName}" saved with ${settingsCount} settings!`);
+            
+            console.log(`Settings Profile Manager: Saved profile "${profileName}" with ${settingsCount} settings (${Object.keys(profileData.clientSettings).length} client, ${Object.keys(profileData.worldSettings).length} world)`);
+
+        } catch (error) {
+            console.error("Settings Profile Manager: Error saving profile:", error);
+            ui.notifications.error("Failed to save profile - check console for details");
+        }
+    }
+
+    async deleteProfile() {
+        if (!this.selectedProfile || !this.profiles[this.selectedProfile]) return;
+
+        try {
+            const confirmed = await foundry.applications.api.DialogV2.confirm({
+                window: { title: "Delete Profile" },
+                content: `<p>Are you sure you want to delete the profile "<strong>${this.selectedProfile}</strong>"?</p><p>This action cannot be undone.</p>`,
+                rejectClose: false,
+                modal: true
             });
+
+            if (!confirmed) return;
+
+            delete this.profiles[this.selectedProfile];
+            
+            if (this.macroDocument) {
+                await this.saveProfiles();
+            }
+            
+            this.selectedProfile = null;
+            await this.render();
+            
+            ui.notifications.info("Profile deleted successfully");
             
         } catch (error) {
-            console.error("Error populating module selector:", error);
-            this.element.querySelector('#module-checkboxes').innerHTML = '<p style="color: #F44336;">Error loading modules</p>';
+            console.error("Settings Profile Manager: Error deleting profile:", error);
+            ui.notifications.error("Failed to delete profile - check console for details");
         }
     }
 
-    selectActiveModules() {
-        this.element.querySelectorAll('.module-checkbox').forEach(checkbox => {
-            const moduleKey = checkbox.value;
-            let moduleName = moduleKey;
-            
-            // Handle scope prefixes
-            if (moduleKey.includes(':')) {
-                moduleName = moduleKey.split(':')[1];
-            }
-            
-            // Check if it's core or an active module
-            if (moduleName === 'core') {
-                checkbox.checked = true;
-            } else {
-                const module = game.modules.get(moduleName);
-                checkbox.checked = module && module.active;
-            }
-        });
-    }
+    async applyProfile() {
+        if (!this.selectedProfile || !this.profiles[this.selectedProfile]) return;
 
-    selectAllModules() {
-        this.element.querySelectorAll('.module-checkbox').forEach(checkbox => {
-            checkbox.checked = true;
-        });
-    }
-
-    deselectAllModules() {
-        this.element.querySelectorAll('.module-checkbox').forEach(checkbox => {
-            checkbox.checked = false;
-        });
-    }
-
-    async generateExportData() {
-        const scope = this.element.querySelector('#settings-scope').value;
-        const allSettings = this.getAllSettings(scope);
-        const exportType = this.element.querySelector('#export-type').value;
+        const profile = this.profiles[this.selectedProfile];
         
-        let settingsToExport = allSettings;
-        let selectedModules = [];
-        
-        if (exportType === 'selective') {
-            const checkedModules = Array.from(this.element.querySelectorAll('.module-checkbox:checked')).map(cb => cb.value);
-            selectedModules = checkedModules;
-            
-            settingsToExport = {};
-            for (const [key, value] of Object.entries(allSettings)) {
-                // Handle scope prefixes when scope is "both"
-                let actualKey = key;
-                let scopePrefix = "";
-                
-                if (scope === "both" && (key.startsWith("client:") || key.startsWith("world:"))) {
-                    const parts = key.split(":", 2);
-                    scopePrefix = parts[0];
-                    actualKey = parts[1];
-                }
-                
-                const namespace = actualKey.split('.')[0];
-                const moduleKey = scope === "both" ? `${scopePrefix}:${namespace}` : namespace;
-                
-                if (checkedModules.includes(moduleKey)) {
-                    settingsToExport[key] = value;
-                }
-            }
+        if (!this.isProfileAccessible(profile)) {
+            ui.notifications.error("You don't have permission to apply this profile");
+            return;
         }
-        
-        return {
-            version: "2.1",
-            timestamp: new Date().toISOString(),
-            foundryVersion: game.version,
-            user: game.user.name,
-            scope: scope,
-            exportType: exportType,
-            selectedModules: selectedModules,
-            settingsCount: Object.keys(settingsToExport).length,
-            settings: settingsToExport
-        };
-    }
 
-    async downloadSettings() {
         try {
-            const exportData = await this.generateExportData();
-            
-            // Create and download file
-            const jsonString = JSON.stringify(exportData, null, 2);
-            const blob = new Blob([jsonString], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            
-            const scope = this.element.querySelector('#settings-scope').value;
-            const scopeSuffix = scope === "both" ? "all" : scope;
-            
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `foundry-${scopeSuffix}-settings-${game.user.name}-${new Date().toISOString().split('T')[0]}.json`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            
-            // Show in results area
-            const resultsArea = this.element.querySelector('#export-results');
-            const jsonOutput = this.element.querySelector('#export-json');
-            resultsArea.classList.remove('hidden');
-            jsonOutput.value = jsonString;
-            
-            ui.notifications.info(`Downloaded ${exportData.settingsCount} ${scopeSuffix} settings!`);
-            
-        } catch (error) {
-            console.error("Error downloading settings:", error);
-            ui.notifications.error("Failed to download settings.");
-        }
-    }
+            const allProfileSettings = { ...profile.clientSettings, ...profile.worldSettings };
+            const changes = [];
 
-    async copySettingsToClipboard() {
-        try {
-            const exportData = await this.generateExportData();
-            const jsonString = JSON.stringify(exportData, null, 2);
-            
-            await navigator.clipboard.writeText(jsonString);
-            
-            // Show in results area
-            const resultsArea = this.element.querySelector('#export-results');
-            const jsonOutput = this.element.querySelector('#export-json');
-            resultsArea.classList.remove('hidden');
-            jsonOutput.value = jsonString;
-            
-            const scope = this.element.querySelector('#settings-scope').value;
-            const scopeSuffix = scope === "both" ? "all" : scope;
-            
-            ui.notifications.info(`Copied ${exportData.settingsCount} ${scopeSuffix} settings to clipboard!`);
-            
-        } catch (error) {
-            console.error("Error copying to clipboard:", error);
-            ui.notifications.error("Failed to copy to clipboard.");
-        }
-    }
+            this.refreshCurrentSettings();
+            const allCurrentSettings = { ...this.currentSettings.client, ...this.currentSettings.world };
 
-    async processImport() {
-        try {
-            const importMethod = this.element.querySelector('#import-method').value;
-            let jsonData = null;
-            
-            if (importMethod === 'file') {
-                const fileInput = this.element.querySelector('#import-file');
-                if (!fileInput.files.length) {
-                    throw new Error("Please select a file to import.");
-                }
+            // Analyze changes
+            for (const [key, profileValue] of Object.entries(allProfileSettings)) {
+                if (!isSettingAccessible(key)) continue;
                 
-                const file = fileInput.files[0];
-                const text = await file.text();
-                jsonData = JSON.parse(text);
-            } else {
-                const textInput = this.element.querySelector('#import-json').value.trim();
-                if (!textInput) {
-                    throw new Error("Please paste JSON data to import.");
+                const currentValue = allCurrentSettings[key];
+                if (JSON.stringify(currentValue) !== JSON.stringify(profileValue)) {
+                    const info = this.currentSettings.settingsInfo[key];
+                    changes.push({
+                        key: key,
+                        name: info?.name || key,
+                        scope: info?.scope || 'unknown',
+                        currentValue,
+                        profileValue
+                    });
                 }
-                jsonData = JSON.parse(textInput);
             }
-            
-            // Validate JSON structure
-            if (!jsonData.settings || typeof jsonData.settings !== 'object') {
-                throw new Error("Invalid JSON format - missing 'settings' object");
+
+            if (changes.length === 0) {
+                ui.notifications.info("No changes needed - profile already matches current state!");
+                return;
             }
-            
-            // Analyze the import data
-            const importScope = jsonData.scope || "client";
-            const settingsCount = Object.keys(jsonData.settings).length;
-            
-            let scopeAnalysis = "";
-            if (importScope === "both") {
-                const clientCount = Object.keys(jsonData.settings).filter(k => k.startsWith("client:")).length;
-                const worldCount = Object.keys(jsonData.settings).filter(k => k.startsWith("world:")).length;
-                scopeAnalysis = `<br>📱 Client Settings: ${clientCount}<br>🌍 World Settings: ${worldCount}`;
-            } else {
-                scopeAnalysis = `<br>📍 Scope: ${importScope.charAt(0).toUpperCase() + importScope.slice(1)} Settings`;
-            }
-            
-            // Show confirmation
-            const proceed = await Dialog.confirm({
-                title: "Confirm Import",
+
+            const changesList = changes.slice(0, 10).map(c => 
+                `<li><strong>${c.name}</strong> (${c.scope}): ${JSON.stringify(c.currentValue)} → ${JSON.stringify(c.profileValue)}</li>`
+            ).join('');
+
+            const confirmed = await foundry.applications.api.DialogV2.confirm({
+                window: { title: `Apply Profile: ${profile.name}` },
                 content: `
-                    <div style="margin-bottom: 15px;">
-                        <strong>Ready to import ${settingsCount} settings</strong>${scopeAnalysis}
+                    <p>This will change the following ${changes.length} settings:</p>
+                    <ul style="margin: 10px 0; padding-left: 20px; max-height: 200px; overflow-y: auto; font-size: 12px;">
+                        ${changesList}
+                        ${changes.length > 10 ? `<li><em>...and ${changes.length - 10} more changes</em></li>` : ''}
+                    </ul>
+                    <div style="background: #fff3cd; padding: 10px; border-radius: 3px; margin: 10px 0; color: #856404; border: 1px solid #ffeaa7;">
+                        <strong>⚠️ Note:</strong> Some settings changes may require a page refresh to take full effect.
                     </div>
-                    <div style="background: #f0f0f0; padding: 10px; border-radius: 3px; margin: 10px 0; font-size: 12px;">
-                        <strong>Import Info:</strong><br>
-                        Version: ${jsonData.version || 'Unknown'}<br>
-                        Date: ${jsonData.timestamp ? new Date(jsonData.timestamp).toLocaleString() : 'Unknown'}<br>
-                        User: ${jsonData.user || 'Unknown'}<br>
-                        Foundry: ${jsonData.foundryVersion || 'Unknown'}
-                    </div>
-                    <div style="background: #fff3cd; padding: 10px; border-radius: 3px; font-size: 12px;">
-                        <strong>⚠️ Warning:</strong> This will overwrite ${settingsCount} of your current settings!
-                        ${importScope === "world" || importScope === "both" ? "<br><strong>Note:</strong> World settings require GM permissions." : ""}
-                    </div>
-                    <p>Continue with import?</p>
                 `,
-                yes: () => true,
-                no: () => false,
-                defaultYes: false
+                rejectClose: false,
+                modal: true
             });
-            
-            if (!proceed) return;
-            
-            // Apply settings
+
+            if (!confirmed) return;
+
             let successCount = 0;
             let errorCount = 0;
-            let skippedCount = 0;
             const errors = [];
-            
-            for (const [key, value] of Object.entries(jsonData.settings)) {
+
+            // Apply settings changes
+            for (const change of changes) {
                 try {
-                    let actualKey = key;
-                    let targetScope = importScope;
+                    const parts = change.key.split('.');
+                    const namespace = parts[0];
+                    const settingKey = parts.slice(1).join('.');
                     
-                    // Handle scope prefixes when import scope is "both"
-                    if (importScope === "both" && (key.startsWith("client:") || key.startsWith("world:"))) {
-                        const parts = key.split(":", 2);
-                        targetScope = parts[0];
-                        actualKey = parts[1];
-                    } else if (importScope === "both") {
-                        // If no scope prefix and import scope is "both", default to client
-                        targetScope = "client";
-                    }
-                    
-                    // Check if setting is valid before attempting to import
-                    if (!isSettingValid(actualKey)) {
-                        const namespace = actualKey.split('.')[0];
-                        const module = game.modules.get(namespace);
-                        
-                        if (namespace !== 'core' && (!module || !module.active)) {
-                            console.warn(`Skipping setting from inactive module: ${actualKey}`);
-                        } else {
-                            console.warn(`Skipping unregistered setting: ${actualKey}`);
-                        }
-                        skippedCount++;
+                    // Double-check the setting is still registered and accessible
+                    if (!isSettingAccessible(change.key)) {
+                        console.warn(`Setting ${change.key} is no longer accessible, skipping`);
+                        errorCount++;
+                        errors.push(`${change.name}: Setting no longer accessible`);
                         continue;
                     }
                     
-                    const parts = actualKey.split('.');
-                    if (parts.length >= 2) {
-                        const namespace = parts[0];
-                        const settingKey = parts.slice(1).join('.');
-                        
-                        // Use the appropriate API based on target scope
-                        if (targetScope === "world") {
-                            // For world settings, we need to check if the user has permission
-                            if (!game.user.isGM) {
-                                throw new Error("Only GMs can import world settings");
-                            }
-                        }
-                        
-                        // Use the standard settings API which will route to correct storage
-                        await game.settings.set(namespace, settingKey, value);
-                        successCount++;
-                    } else {
-                        console.warn(`Skipping invalid setting key: ${key}`);
-                        skippedCount++;
-                    }
+                    await game.settings.set(namespace, settingKey, change.profileValue);
+                    successCount++;
                 } catch (error) {
-                    console.error(`Failed to import setting ${key}:`, error);
-                    errors.push(`${key}: ${error.message}`);
+                    console.error(`Failed to apply setting ${change.key}:`, error);
+                    errors.push(`${change.name}: ${error.message}`);
                     errorCount++;
                 }
             }
+
+            ui.notifications.info(`Profile applied: ${successCount} settings changed, ${errorCount} failed`);
             
-            // Show results
-            const resultsHtml = `
-                <div style="color: #155724; background: #d4edda; border: 1px solid #c3e6cb; padding: 10px; border-radius: 3px;">
-                    <strong>Import completed!</strong><br>
-                    ✅ Successfully imported: ${successCount} settings<br>
-                    ${skippedCount > 0 ? `⏭️ Skipped (inactive/unregistered): ${skippedCount} settings<br>` : ''}
-                    ${errorCount > 0 ? `❌ Failed to import: ${errorCount} settings<br>` : ''}
-                    ${errors.length > 0 ? `<details style="margin-top: 5px;"><summary>View errors (${errors.length})</summary><pre style="font-size: 10px; max-height: 100px; overflow-y: auto; margin: 5px 0;">${errors.join('\n')}</pre></details>` : ''}
-                </div>
-            `;
+            if (errorCount > 0) {
+                console.warn("Settings Profile Manager: Settings application errors:", errors);
+            }
+
+            // Refresh current settings and UI
+            this.refreshCurrentSettings();
+            this.updateProfileDetails();
             
-            const resultsArea = this.element.querySelector('#import-results');
-            resultsArea.innerHTML = resultsHtml;
-            resultsArea.classList.remove('hidden');
-            
-            ui.notifications.info(`Import completed: ${successCount} imported, ${skippedCount} skipped, ${errorCount} failed`);
-            
-            // Offer to reload
             if (successCount > 0) {
                 setTimeout(async () => {
-                    const shouldReload = await Dialog.confirm({
-                        title: "Reload Page?",
-                        content: "<p>Settings have been imported. Some changes may require a page reload to take effect. Reload now?</p>",
-                        yes: () => true,
-                        no: () => false,
-                        defaultYes: false
+                    const shouldRefresh = await foundry.applications.api.DialogV2.confirm({
+                        window: { title: "Refresh Page?" },
+                        content: "<p>Settings have been applied. Some changes may require a page refresh to take effect. Refresh now?</p>",
+                        rejectClose: false,
+                        modal: true
                     });
                     
-                    if (shouldReload) {
+                    if (shouldRefresh) {
                         window.location.reload();
                     }
                 }, 2000);
             }
             
         } catch (error) {
-            console.error("Error importing settings:", error);
-            const errorHtml = `
-                <div style="color: #721c24; background: #f8d7da; border: 1px solid #f5c6cb; padding: 10px; border-radius: 3px;">
-                    <strong>Import failed:</strong> ${error.message}
-                </div>
-            `;
-            const resultsArea = this.element.querySelector('#import-results');
-            resultsArea.innerHTML = errorHtml;
-            resultsArea.classList.remove('hidden');
+            console.error("Settings Profile Manager: Error applying profile:", error);
+            ui.notifications.error(`Failed to apply profile: ${error.message}`);
+        }
+    }
+
+    async exportProfiles() {
+        try {
+            const exportData = {
+                version: "1.0",
+                timestamp: new Date().toISOString(),
+                foundryVersion: game.version,
+                user: game.user.name,
+                profileCount: Object.keys(this.profiles).length,
+                profiles: this.profiles
+            };
+
+            const jsonString = JSON.stringify(exportData, null, 2);
+            const filename = `settings-profiles-${game.user.name}-${new Date().toISOString().split('T')[0]}.json`;
+            
+            const blob = new Blob([jsonString], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            
+            const downloadLink = document.createElement('a');
+            downloadLink.href = url;
+            downloadLink.download = filename;
+            downloadLink.style.display = 'none';
+            
+            document.body.appendChild(downloadLink);
+            setTimeout(() => {
+                downloadLink.click();
+                document.body.removeChild(downloadLink);
+                URL.revokeObjectURL(url);
+            }, 10);
+            
+            ui.notifications.info(`Exported ${Object.keys(this.profiles).length} profiles!`);
+
+        } catch (error) {
+            console.error("Settings Profile Manager: Error exporting profiles:", error);
+            ui.notifications.error("Failed to export profiles - check console for details");
+        }
+    }
+
+    showImportArea() {
+        this.element.querySelector('#import-area').classList.remove('hidden');
+    }
+
+    hideImportArea() {
+        this.element.querySelector('#import-area').classList.add('hidden');
+    }
+
+    toggleImportMethod() {
+        const method = this.element.querySelector('#import-method').value;
+        const fileUpload = this.element.querySelector('#file-upload');
+        const pasteArea = this.element.querySelector('#paste-area');
+        
+        if (method === 'file') {
+            fileUpload.classList.remove('hidden');
+            pasteArea.classList.add('hidden');
+        } else {
+            fileUpload.classList.add('hidden');
+            pasteArea.classList.remove('hidden');
+        }
+    }
+
+    async importProfiles() {
+        try {
+            const method = this.element.querySelector('#import-method').value;
+            let importData = null;
+
+            if (method === 'file') {
+                const fileInput = this.element.querySelector('#import-file');
+                if (!fileInput.files.length) {
+                    ui.notifications.warn("Please select a file to import");
+                    return;
+                }
+                
+                const file = fileInput.files[0];
+                const text = await file.text();
+                importData = JSON.parse(text);
+            } else {
+                const textInput = this.element.querySelector('#import-json').value.trim();
+                if (!textInput) {
+                    ui.notifications.warn("Please paste JSON data to import");
+                    return;
+                }
+                importData = JSON.parse(textInput);
+            }
+
+            if (!importData.profiles || typeof importData.profiles !== 'object') {
+                throw new Error("Invalid format - missing 'profiles' object");
+            }
+
+            const profileNames = Object.keys(importData.profiles);
+            const conflicts = profileNames.filter(name => this.profiles[name]);
+            
+            // Check for permission issues
+            const restrictedProfiles = profileNames.filter(name => {
+                const profile = importData.profiles[name];
+                return !this.isProfileAccessible(profile);
+            });
+
+            if (restrictedProfiles.length > 0) {
+                ui.notifications.warn(`Skipping ${restrictedProfiles.length} profiles that require GM permissions: ${restrictedProfiles.join(', ')}`);
+            }
+
+            let proceed = true;
+            if (conflicts.length > 0) {
+                proceed = await foundry.applications.api.DialogV2.confirm({
+                    window: { title: "Import Conflicts" },
+                    content: `
+                        <p>The following profiles already exist and will be overwritten:</p>
+                        <ul style="margin: 10px 0; padding-left: 20px;">
+                            ${conflicts.map(name => `<li><strong>${name}</strong></li>`).join('')}
+                        </ul>
+                        <p>Continue with import?</p>
+                    `,
+                    rejectClose: false,
+                    modal: true
+                });
+            }
+
+            if (!proceed) return;
+
+            let importedCount = 0;
+            for (const [name, profile] of Object.entries(importData.profiles)) {
+                if (this.isProfileAccessible(profile)) {
+                    try {
+                        // Validate and clean the profile data before importing
+                        const cleanProfile = {
+                            name: profile.name || name,
+                            scope: profile.scope || 'client',
+                            timestamp: profile.timestamp || new Date().toISOString(),
+                            user: profile.user || 'Unknown',
+                            foundryVersion: profile.foundryVersion || 'Unknown',
+                            clientSettings: {},
+                            worldSettings: {}
+                        };
+                        
+                        // Clean and validate client settings
+                        for (const [key, value] of Object.entries(profile.clientSettings || {})) {
+                            if (isSafeForFlagStorage(value) && isSettingAccessible(key)) {
+                                cleanProfile.clientSettings[key] = value;
+                            } else {
+                                console.warn(`Settings Profile Manager: Skipping problematic client setting ${key} in imported profile ${name}`);
+                            }
+                        }
+                        
+                        // Clean and validate world settings
+                        for (const [key, value] of Object.entries(profile.worldSettings || {})) {
+                            if (isSafeForFlagStorage(value) && isSettingAccessible(key)) {
+                                cleanProfile.worldSettings[key] = value;
+                            } else {
+                                console.warn(`Settings Profile Manager: Skipping problematic world setting ${key} in imported profile ${name}`);
+                            }
+                        }
+                        
+                        this.profiles[name] = cleanProfile;
+                        importedCount++;
+                    } catch (error) {
+                        console.warn(`Settings Profile Manager: Failed to import profile ${name}:`, error);
+                    }
+                }
+            }
+
+            await this.saveProfiles();
+            
+            this.hideImportArea();
+            await this.render();
+            
+            ui.notifications.info(`Successfully imported ${importedCount} profiles!`);
+
+        } catch (error) {
+            console.error("Settings Profile Manager: Error importing profiles:", error);
             ui.notifications.error(`Import failed: ${error.message}`);
         }
     }
 }
 
-// Execute the macro
-async function showSettingsManagerV2() {
+async function showSettingsProfilesManager() {
     try {
-        // Check if already running and close
-        if (game.settingsManagerApp?.rendered) {
-            game.settingsManagerApp.close();
+        if (game.settingsProfilesManagerApp?.rendered) {
+            game.settingsProfilesManagerApp.close();
         }
 
-        // Create and render the ApplicationV2
-        game.settingsManagerApp = new SettingsManagerApp();
-        game.settingsManagerApp.render(true);
+        game.settingsProfilesManagerApp = new SettingsProfilesManagerApp();
+        game.settingsProfilesManagerApp.render(true);
 
     } catch (error) {
-        console.error("Error creating Settings Manager:", error);
-        ui.notifications.error("Failed to open Settings Manager. Check console for details.");
+        console.error("Settings Profile Manager: Error creating application:", error);
+        ui.notifications.error("Failed to open Settings Profiles Manager. Check console for details.");
     }
 }
 
-// Show the Settings Manager
-showSettingsManagerV2();
+showSettingsProfilesManager();
