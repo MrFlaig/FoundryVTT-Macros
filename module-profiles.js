@@ -1,9 +1,3 @@
-/**
- * MODULE PROFILES MANAGER - ApplicationV2 Version
- * Save, manage, and switch between named module profiles
- * Stores profiles persistently using Foundry's client settings
- */
-
 class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
     static DEFAULT_OPTIONS = {
         id: "module-profiles-manager",
@@ -20,7 +14,7 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
         modal: false
     };
 
-    static FLAG_SCOPE = "dnd5e"; // Use active system as scope
+    static FLAG_SCOPE = game.system.id;
     static FLAG_KEY = "module-profiles-data";
 
     constructor() {
@@ -49,7 +43,6 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
 
         return `
             <form class="module-profiles-form">
-                <!-- Header -->
                 <div class="header-section">
                     <h2>Module Profiles Manager</h2>
                     <p class="subtitle">Save, manage, and switch between module configurations</p>
@@ -73,7 +66,6 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
                     </div>
                 </div>
 
-                <!-- Profile Management Section -->
                 <div class="profiles-section">
                     <h3 class="section-title">Saved Profiles</h3>
                     
@@ -98,7 +90,6 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
                     </div>
                 </div>
 
-                <!-- Save New Profile Section -->
                 <div class="save-section">
                     <h3 class="section-title">Save Current Configuration</h3>
                     
@@ -120,7 +111,6 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
                     </button>
                 </div>
 
-                <!-- Import/Export Section -->
                 <div class="import-export-section">
                     <h3 class="section-title">Import/Export</h3>
                     
@@ -161,7 +151,6 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
                     </div>
                 </div>
 
-                <!-- Warning -->
                 <div class="warning-box">
                     <strong>⚠️ Important:</strong> Module configuration changes require a world reload to take effect.
                     <br><strong>Persistence:</strong> Profiles are saved as flags on the macro document. If you delete the macro profiles are gone.
@@ -515,19 +504,16 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
     }
 
     setupEventHandlers() {
-        // Profile selector
         this.element.querySelector('#profile-selector')?.addEventListener('change', (e) => {
             this.selectedProfile = e.target.value || null;
             this.updateProfileButtons();
             this.updateProfileDetails();
         });
 
-        // Profile actions
         this.element.querySelector('#load-profile-btn')?.addEventListener('click', () => this.applyProfile());
         this.element.querySelector('#delete-profile-btn')?.addEventListener('click', () => this.deleteProfile());
         this.element.querySelector('#save-profile-btn')?.addEventListener('click', () => this.saveProfile());
 
-        // Import/Export
         this.element.querySelector('#export-profiles-btn')?.addEventListener('click', () => this.exportProfiles());
         this.element.querySelector('#import-profiles-btn')?.addEventListener('click', () => this.showImportArea());
         this.element.querySelector('#import-method')?.addEventListener('change', () => this.toggleImportMethod());
@@ -539,30 +525,29 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
 
     loadProfiles() {
         try {
-            // Try to find the macro document by looking for one that contains our class name
-            // This is more reliable than searching by name
             this.macroDocument = game.macros.find(m => 
                 m.command?.includes("ModuleProfilesManagerApp") || 
                 m.command?.includes("showModuleProfilesManager")
             );
             
             if (!this.macroDocument) {
-                console.warn("Could not find macro document - profiles will not persist across sessions");
-                console.warn("To enable persistence, make sure this code is run from a saved macro");
+                console.log("No macro document found for profile persistence");
                 this.profiles = {};
                 return;
             }
 
+            console.log(`Found macro document: ${this.macroDocument.name} (${this.macroDocument.id})`);
+
             const savedData = this.macroDocument.getFlag(ModuleProfilesManagerApp.FLAG_SCOPE, ModuleProfilesManagerApp.FLAG_KEY);
             if (savedData && savedData.profiles) {
                 this.profiles = savedData.profiles;
-                console.log(`Loaded ${Object.keys(this.profiles).length} profiles from macro "${this.macroDocument.name}"`);
+                console.log(`Loaded ${Object.keys(this.profiles).length} profiles:`, Object.keys(this.profiles));
             } else {
+                console.log("No saved profile data found in macro flags (flag may have been unset)");
                 this.profiles = {};
-                console.log("No existing profiles found - starting fresh");
             }
         } catch (error) {
-            console.warn("Could not load profiles from macro flags:", error);
+            console.error("Error loading profiles:", error);
             this.profiles = {};
         }
     }
@@ -570,22 +555,43 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
     async saveProfiles() {
         try {
             if (!this.macroDocument) {
-                ui.notifications.warn("No macro document found - profiles will be lost when page refreshes. Run this from a saved macro for persistence.");
-                return; // Don't throw error, just warn
+                const error = "No macro document found - profiles will be lost when page refreshes. Run this from a saved macro for persistence.";
+                ui.notifications.warn(error);
+                throw new Error(error);
             }
 
-            const data = {
-                version: "1.0",
-                timestamp: new Date().toISOString(),
-                profiles: this.profiles
-            };
+            console.log(`Saving profiles to macro ${this.macroDocument.name}:`, Object.keys(this.profiles));
+
+            // Check if we should unset the flag (when no profiles exist) or set it
+            if (Object.keys(this.profiles).length === 0) {
+                console.log("No profiles remaining, unsetting flag...");
+                await this.macroDocument.unsetFlag(ModuleProfilesManagerApp.FLAG_SCOPE, ModuleProfilesManagerApp.FLAG_KEY);
+                console.log("Flag unset successfully");
+            } else {
+                const data = {
+                    version: "1.0",
+                    timestamp: new Date().toISOString(),
+                    profiles: this.profiles
+                };
+                
+                console.log("Setting flag with data:", data);
+                const result = await this.macroDocument.setFlag(ModuleProfilesManagerApp.FLAG_SCOPE, ModuleProfilesManagerApp.FLAG_KEY, data);
+                console.log("setFlag result:", result);
+                
+                // Verify the save worked immediately
+                const verification = this.macroDocument.getFlag(ModuleProfilesManagerApp.FLAG_SCOPE, ModuleProfilesManagerApp.FLAG_KEY);
+                console.log("Immediate verification:", verification);
+                
+                if (!verification || verification.timestamp !== data.timestamp) {
+                    throw new Error("Flag was not properly saved - verification failed");
+                }
+            }
             
-            await this.macroDocument.setFlag(ModuleProfilesManagerApp.FLAG_SCOPE, ModuleProfilesManagerApp.FLAG_KEY, data);
-            console.log(`Saved ${Object.keys(this.profiles).length} profiles to macro "${this.macroDocument.name}"`);
+            console.log("Profiles saved successfully");
             
         } catch (error) {
-            console.error("Failed to save profiles to macro flags:", error);
-            ui.notifications.error("Failed to save profiles - check console for details");
+            console.error("Save profiles error:", error);
+            ui.notifications.error(`Failed to save profiles: ${error.message}`);
             throw error;
         }
     }
@@ -604,7 +610,6 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
 
         const config = this.getCurrentModuleConfig();
         
-        // Show ALL modules with their status
         const allModules = Object.entries(config)
             .sort(([a], [b]) => a.localeCompare(b))
             .map(([id, active]) => {
@@ -644,14 +649,12 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
         const infoElement = this.element.querySelector('#profile-info');
         const changesElement = this.element.querySelector('#profile-changes');
 
-        // Show profile info
         infoElement.innerHTML = `
             <strong>Profile:</strong> ${profile.name}<br>
             <strong>Created:</strong> ${new Date(profile.timestamp).toLocaleString()}<br>
             <strong>Modules:</strong> ${Object.keys(profile.modules).length} total, ${Object.values(profile.modules).filter(a => a).length} active
         `;
 
-        // Calculate changes
         const currentConfig = this.getCurrentModuleConfig();
         const changes = [];
 
@@ -722,7 +725,6 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
 
             await this.saveProfiles();
             
-            // Clear input and refresh
             nameInput.value = '';
             this.selectedProfile = profileName;
             await this.render();
@@ -730,7 +732,7 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
             ui.notifications.info(`Profile "${profileName}" saved successfully!`);
 
         } catch (error) {
-            console.error("Error saving profile:", error);
+            console.error("Save profile error:", error);
             ui.notifications.error("Failed to save profile");
         }
     }
@@ -748,23 +750,55 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
 
             if (!confirmed) return;
 
-            // Remove from profiles object
-            delete this.profiles[this.selectedProfile];
+            const profileToDelete = this.selectedProfile;
+
+            // Verify macro document exists
+            if (!this.macroDocument) {
+                ui.notifications.error("No macro document found - cannot persist deletion");
+                return;
+            }
+
+            console.log(`Deleting profile: ${profileToDelete}`);
+            console.log(`Profiles before deletion:`, Object.keys(this.profiles));
+
+            // Delete from local object
+            delete this.profiles[profileToDelete];
             
-            // If we have a macro document, also remove the flag completely and save
-            if (this.macroDocument) {
-                // Save the updated profiles (which no longer includes the deleted one)
+            console.log(`Profiles after deletion:`, Object.keys(this.profiles));
+
+            // Save to flags and wait for completion
+            try {
                 await this.saveProfiles();
+                
+                // Verify the save worked by checking the flags
+                const savedData = this.macroDocument.getFlag(ModuleProfilesManagerApp.FLAG_SCOPE, ModuleProfilesManagerApp.FLAG_KEY);
+                if (savedData && savedData.profiles && savedData.profiles[profileToDelete]) {
+                    throw new Error("Profile still exists in saved flags after deletion");
+                }
+                
+                console.log(`Profile ${profileToDelete} successfully deleted and saved`);
+                
+            } catch (saveError) {
+                console.error("Save failed:", saveError);
+                // Restore the profile since save failed
+                this.loadProfiles();
+                ui.notifications.error(`Failed to save deletion: ${saveError.message}`);
+                return;
             }
             
             this.selectedProfile = null;
+            
+            // Clear the dropdown selection immediately
+            const selector = this.element.querySelector('#profile-selector');
+            if (selector) selector.value = '';
+            
             await this.render();
             
-            ui.notifications.info("Profile deleted successfully");
+            ui.notifications.info(`Profile "${profileToDelete}" deleted successfully`);
             
         } catch (error) {
-            console.error("Error deleting profile:", error);
-            ui.notifications.error("Failed to delete profile");
+            console.error("Delete profile error:", error);
+            ui.notifications.error(`Failed to delete profile: ${error.message}`);
         }
     }
 
@@ -780,7 +814,6 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
         const currentConfig = this.getCurrentModuleConfig();
         const changes = [];
 
-        // Calculate changes
         for (const [moduleId, shouldBeActive] of Object.entries(profile.modules)) {
             const currentlyActive = currentConfig[moduleId] || false;
             if (currentlyActive !== shouldBeActive) {
@@ -799,7 +832,6 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
             return;
         }
 
-        // Show confirmation
         const changesList = changes.map(c => 
             `<li><strong>${c.name}</strong>: ${c.from ? 'Enabled' : 'Disabled'} → ${c.to ? 'Enabled' : 'Disabled'}</li>`
         ).join('');
@@ -822,23 +854,19 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
 
             if (!confirmed) return;
 
-            // Show loading notification
             ui.notifications.info(`Applying profile "${profile.name}"... World will reload automatically.`);
             
-            // Apply the module configuration
             await game.settings.set("core", "moduleConfiguration", profile.modules);
             
-            // Close the application before reload
             this.close();
             
-            // Automatically reload after a short delay
             setTimeout(() => {
                 ui.notifications.info("Reloading world to apply module changes...");
                 window.location.reload();
             }, 1500);
             
         } catch (error) {
-            console.error("Error applying profile:", error);
+            console.error("Apply profile error:", error);
             ui.notifications.error(`Failed to apply profile: ${error.message}`);
         }
     }
@@ -857,26 +885,29 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
             const jsonString = JSON.stringify(exportData, null, 2);
             const filename = `module-profiles-${game.user.name}-${new Date().toISOString().split('T')[0]}.json`;
             
-            // Use File constructor as in the original working version
-            const file = new File([jsonString], filename, { type: 'application/json' });
-            const url = URL.createObjectURL(file);
+            // Create blob and download link
+            const blob = new Blob([jsonString], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
             
             const downloadLink = document.createElement('a');
             downloadLink.href = url;
             downloadLink.download = filename;
+            
+            // Ensure the link is added to DOM and clicked with proper timing
+            document.body.appendChild(downloadLink);
             downloadLink.style.display = 'none';
             
-            document.body.appendChild(downloadLink);
-            downloadLink.click();
-            document.body.removeChild(downloadLink);
-            
-            // Use timeout as in the original working version
-            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            // Small delay to ensure DOM insertion, then click
+            setTimeout(() => {
+                downloadLink.click();
+                document.body.removeChild(downloadLink);
+                URL.revokeObjectURL(url);
+            }, 10);
             
             ui.notifications.info(`Exported ${Object.keys(this.profiles).length} profiles!`);
 
         } catch (error) {
-            console.error("Error exporting profiles:", error);
+            console.error("Export profiles error:", error);
             ui.notifications.error("Failed to export profiles");
         }
     }
@@ -952,7 +983,6 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
 
             if (!proceed) return;
 
-            // Import profiles
             Object.assign(this.profiles, importData.profiles);
             await this.saveProfiles();
             
@@ -962,29 +992,25 @@ class ModuleProfilesManagerApp extends foundry.applications.api.ApplicationV2 {
             ui.notifications.info(`Successfully imported ${profileNames.length} profiles!`);
 
         } catch (error) {
-            console.error("Error importing profiles:", error);
+            console.error("Import profiles error:", error);
             ui.notifications.error(`Import failed: ${error.message}`);
         }
     }
 }
 
-// Execute the macro
 async function showModuleProfilesManager() {
     try {
-        // Check if already running and close
         if (game.moduleProfilesManagerApp?.rendered) {
             game.moduleProfilesManagerApp.close();
         }
 
-        // Create and render the ApplicationV2
         game.moduleProfilesManagerApp = new ModuleProfilesManagerApp();
         game.moduleProfilesManagerApp.render(true);
 
     } catch (error) {
-        console.error("Error creating Module Profiles Manager:", error);
+        console.error("Failed to open Module Profiles Manager:", error);
         ui.notifications.error("Failed to open Module Profiles Manager. Check console for details.");
     }
 }
 
-// Show the Module Profiles Manager
 showModuleProfilesManager();
